@@ -1,0 +1,35 @@
+# herdr-state — realtime "what is the agent working on" status pane.
+#
+# One toggle action opens a right split in the current workspace hosting a
+# ratatui status app. The app holds its own long-lived socket connection
+# (events.subscribe) — no [[events]] hooks here on purpose: hook commands are
+# spawned per event, the wrong tool for a live stream.
+#
+# Placement is `split` (persistent layout pane). `overlay`/`zoomed` are
+# transient views torn down when the invoking keybinding action completes, and
+# `popup` is a session-modal singleton without a pane id — neither fits a
+# glanceable, persistent status pane.
+
+id = "herdr-agent-state"
+name = "herdr-agent-state"
+version = "1.0.0"
+description = "Realtime status pane: what each agent in this workspace is working on."
+min_herdr_version = "0.7.4"
+platforms = ["linux", "macos"]
+
+# Build the pane binary at install time (plugin link skips this — run
+# `cargo build --release` yourself for local dev).
+[[build]]
+command = ["cargo", "build", "--release"]
+
+[[panes]]
+id = "status"
+title = "⏱ state"
+placement = "split"
+command = ["./target/release/herdr-agent-state"]
+
+[[actions]]
+id = "toggle"
+title = "Toggle agent status pane"
+description = "Open or dismiss the agent status pane for this workspace."
+command = ["bash", "scripts/toggle-state.sh"]

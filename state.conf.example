@@ -1,0 +1,52 @@
+# herdr-state configuration (KEY=VALUE lines; '#' comments ignored).
+#
+# Copy to the plugin config dir to activate:
+#   cp state.conf.example "$(herdr plugin config-dir herdr-agent-state)/state.conf"
+#
+# Env overrides win over this file per invocation: HERDR_STATE_POLL_MS,
+# HERDR_STATE_TAIL_BYTES, HERDR_STATE_MAX_ACTIVITY,
+# HERDR_STATE_TEXT_SNIPPET_LEN, HERDR_STATE_KEY_HINT,
+# HERDR_STATE_SHOW_ALL_PANES.
+
+# Transcript poll interval in ms; also the UI clock tick (100-5000).
+poll_ms = 500
+
+# Agent-status reconcile interval in ms (500-10000): polls `agent.list` for
+# the status ground truth, since working→idle flips arrive on no
+# subscribable event.
+status_poll_ms = 2000
+
+# Working with no visible updates for this long → static "thinking…" line
+# on the card (1000-60000).
+thinking_after_ms = 5000
+
+# Initial tail window per transcript file, bytes (4096-4194304). Deeper
+# window = more session history available to scroll back through on open.
+tail_bytes = 262144
+
+# Max steps summarized per AI batch (1-50). Full session history is always
+# kept and scrollable; this only bounds summarizer work per call.
+max_activity = 12
+
+# Last-assistant-text truncation, chars (40-1000).
+text_snippet_len = 200
+
+# Shown in the header hint (display only — the real key lives in config.toml).
+key_hint = prefix+shift+s
+
+# Also show panes with no detected agent.
+show_all_panes = false
+
+# AI step summaries: rewrite raw tool calls into short human phrases using a
+# local agent CLI. auto = claude then codex, whichever is on PATH; or force
+# claude / codex / off.
+summarizer = auto
+
+# Summary models — keep these cheap and fast; summaries are cosmetic and a
+# batch fires every few seconds while an agent works.
+summary_model = haiku              # claude CLI
+codex_summary_model = gpt-5.4-mini # codex CLI
+
+# Where x writes Markdown exports of the update log. Empty = the workspace's
+# working directory (exports land next to your project).
+export_dir =

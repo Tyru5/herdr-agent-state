@@ -1,0 +1,18 @@
+[package]
+name = "herdr-agent-state"
+version = "1.0.0"
+edition = "2021"
+description = "Realtime agent status pane for herdr — what each agent in the workspace is working on"
+license = "MIT"
+repository = "https://github.com/Tyru5/herdr-agent-state"
+
+[dependencies]
+# TUI drawing; also re-exports crossterm so backend + terminal setup share one version.
+ratatui = "0.29"
+# SIGWINCH → re-layout.
+signal-hook = "0.3"
+# Every input (socket events, snapshots, transcripts) is schema-drifting
+# third-party JSON: Value + defensive accessors, no serde derives.
+serde_json = "1"
+# Transcript timestamps (ISO UTC) → local time/date under the last response.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
