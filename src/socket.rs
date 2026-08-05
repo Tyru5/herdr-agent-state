@@ -82,7 +82,10 @@ fn run(tx: &Sender<Ev>, cmds: &Receiver<SocketCmd>, cfg: &Config) {
             Ok(()) => return, // main hung up; quit quietly
             Err(e) => e.to_string(),
         };
-        if tx.send(Ev::Socket(SocketMsg::Disconnected(reason))).is_err() {
+        if tx
+            .send(Ev::Socket(SocketMsg::Disconnected(reason)))
+            .is_err()
+        {
             return;
         }
         std::thread::sleep(backoff);
@@ -241,7 +244,12 @@ fn handle_line(line: &[u8], tx: &Sender<Ev>) -> Result<(), ()> {
     Ok(())
 }
 
-fn write_req(stream: &mut UnixStream, id: &str, method: &str, params: Value) -> std::io::Result<()> {
+fn write_req(
+    stream: &mut UnixStream,
+    id: &str,
+    method: &str,
+    params: Value,
+) -> std::io::Result<()> {
     use std::io::Write;
     let mut line = serde_json::to_vec(&json!({"id": id, "method": method, "params": params}))?;
     line.push(b'\n');

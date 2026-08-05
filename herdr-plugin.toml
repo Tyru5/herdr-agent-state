@@ -12,7 +12,7 @@
 
 id = "herdr-agent-state"
 name = "herdr-agent-state"
-version = "1.0.0"
+version = "1.1.0"
 description = "Realtime status pane: what each agent in this workspace is working on."
 min_herdr_version = "0.7.4"
 platforms = ["linux", "macos"]

@@ -44,11 +44,12 @@ Two data layers feed the pane:
    Because status flips (working→idle) arrive on no workspace-subscribable
    event, an `agent.list` reconcile poll (every `status_poll_ms`, default 2s)
    keeps status, titles, and the card set in lockstep with herdr's sidebar.
-2. **Claude Code transcripts** — the pane's agent-session binding resolves to
-   a transcript JSONL under `~/.claude/projects/`, which the app tails for
-   tool-call activity (`▸ Edit src/ui.rs`), the last assistant message, and
-   token usage. Agents without a transcript (codex, cursor, …) fall back to
-   the status-badge card: agent, status, title, time-in-status.
+2. **Agent transcripts** — the pane's agent-session binding resolves to a
+   transcript JSONL under `~/.claude/projects/` (Claude Code) or
+   `~/.codex/sessions/` (Codex), which the app tails for tool-call activity
+   (`▸ Edit src/ui.rs` / `▸ Exec cargo test`), the last assistant message,
+   model and effort, and token usage. Agents without a supported transcript
+   fall back to the status-badge card: agent, status, title, time-in-status.
 3. **AI step summaries** — each tool call is rewritten into a short human
    phrase ("Fixed the reconnect backoff in socket.rs") by a local agent CLI:
    `claude --print` first, `codex exec` as fallback. Summaries deliberately
@@ -140,10 +141,9 @@ Env overrides
 
 ## Limitations
 
-- Transcript-level detail (tool calls, last message, tokens) is Claude
-  Code–specific and depends on herdr's Claude integration
-  (`herdr integration install claude`) binding the session to the pane.
-  Other agents get status/title cards from herdr's detection engine.
+- Transcript-level detail depends on herdr binding the Claude Code or Codex
+  session to the pane. Other agents get status/title cards from herdr's
+  detection engine.
 - The split opens at herdr's default width (no size flag on
   `plugin pane open` for splits as of 0.8.0).
 - Placement must be `split`: `overlay`/`zoomed` are transient views herdr

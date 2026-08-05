@@ -1,18 +1,18 @@
-//! Claude Code transcript tailing: the rich "what is it actually doing" layer.
+//! Agent transcript tailing: the rich "what is it actually doing" layer.
 //!
-//! The herdr Claude integration binds each agent pane to its session — either
-//! a transcript path directly (`agent_session.kind == "path"`) or a session id
-//! we resolve to `~/.claude/projects/<slug(cwd)>/<id>.jsonl`. This module
-//! tails those JSONL files on a poll (no inotify: the poll doubles as the UI
-//! tick and dodges WSL2 watcher edge cases) and parses assistant lines into a
-//! compact activity feed.
+//! Herdr binds each agent pane to its session — either a transcript path
+//! directly (`agent_session.kind == "path"`) or a session id. Claude ids
+//! resolve under `~/.claude/projects`; Codex ids resolve under
+//! `~/.codex/sessions`. This module tails those JSONL files on a poll (no
+//! inotify: the poll doubles as the UI tick and dodges WSL2 watcher edge
+//! cases) and parses their agent-specific records into one compact feed.
 //!
 //! Transcripts contain plenty of non-message line types (`last-prompt`,
 //! `mode`, `bridge-session`, attachments…) and the schema drifts — parsing is
 //! tolerant by construction: any line of unknown shape contributes nothing.
 
 use std::collections::HashMap;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{BufRead, Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::time::Duration;
@@ -52,7 +52,8 @@ pub struct TranscriptUpdate {
     pub last_text: Option<String>,
     /// ISO-8601 timestamp of the line that set `last_text`, when present.
     pub last_text_at: Option<String>,
-    /// Model id from the newest assistant line ("claude-fable-5").
+    /// Model id from the newest assistant/context line ("claude-fable-5",
+    /// "gpt-5.6-sol").
     pub model: Option<String>,
     /// Reasoning effort from the newest assistant line ("high").
     pub effort: Option<String>,
@@ -125,14 +126,24 @@ fn run(tx: &Sender<Ev>, cmds: &Receiver<TailerCmd>, cfg: &Config) {
     }
 }
 
-fn apply_cmd(cmd: TailerCmd, watched: &mut HashMap<String, TailState>, tx: &Sender<Ev>, cfg: &Config) {
+fn apply_cmd(
+    cmd: TailerCmd,
+    watched: &mut HashMap<String, TailState>,
+    tx: &Sender<Ev>,
+    cfg: &Config,
+) {
     match cmd {
         TailerCmd::Watch { pane_id, path } => {
             // Re-watch of the same path is a no-op; a new path re-seeds.
             if watched.get(&pane_id).is_some_and(|s| s.path == path) {
                 return;
             }
-            let mut st = TailState { path, offset: 0, partial: String::new(), reported_stale: false };
+            let mut st = TailState {
+                path,
+                offset: 0,
+                partial: String::new(),
+                reported_stale: false,
+            };
             let up = seed(&mut st, cfg);
             let _ = tx.send(Ev::Transcript(pane_id.clone(), up));
             watched.insert(pane_id, st);
@@ -146,7 +157,11 @@ fn apply_cmd(cmd: TailerCmd, watched: &mut HashMap<String, TailState>, tx: &Send
 /// Seed from the tail of the file: seek to `len - tail_bytes`, discard the
 /// first (likely partial) line, parse the rest.
 fn seed(st: &mut TailState, cfg: &Config) -> TranscriptUpdate {
-    let mut up = TranscriptUpdate { reset: true, ..Default::default() };
+    let mut up = TranscriptUpdate {
+        reset: true,
+        ..Default::default()
+    };
+    seed_agent_metadata(&st.path, &mut up);
     let Ok(mut f) = std::fs::File::open(&st.path) else {
         up.stale = true;
         st.reported_stale = true;
@@ -187,6 +202,25 @@ fn seed(st: &mut TailState, cfg: &Config) -> TranscriptUpdate {
     up
 }
 
+/// Model/effort live in Codex's per-turn context, which can fall before the
+/// bounded activity tail after a few large tool outputs. Scan only those
+/// sparse records once when attaching; activity still obeys `tail_bytes`.
+fn seed_agent_metadata(path: &std::path::Path, up: &mut TranscriptUpdate) {
+    let Ok(file) = std::fs::File::open(path) else {
+        return;
+    };
+    let mut reader = std::io::BufReader::new(file);
+    let mut line = String::new();
+    while reader.read_line(&mut line).is_ok_and(|n| n > 0) {
+        if line.contains("\"type\":\"turn_context\"") {
+            if let Ok(value) = serde_json::from_str::<Value>(&line) {
+                parse_codex_context(&value, up);
+            }
+        }
+        line.clear();
+    }
+}
+
 /// One poll: detect growth (read delta), truncation (re-seed), disappearance
 /// (stale once).
 fn poll_file(st: &mut TailState, cfg: &Config) -> Option<TranscriptUpdate> {
@@ -197,7 +231,10 @@ fn poll_file(st: &mut TailState, cfg: &Config) -> Option<TranscriptUpdate> {
                 return None;
             }
             st.reported_stale = true;
-            return Some(TranscriptUpdate { stale: true, ..Default::default() });
+            return Some(TranscriptUpdate {
+                stale: true,
+                ..Default::default()
+            });
         }
     };
     if len < st.offset {
@@ -240,13 +277,19 @@ fn parse_line_str(line: &str, offset: u64, cfg: &Config, up: &mut TranscriptUpda
     }
 }
 
-/// Fold one transcript line into an update. Only assistant lines matter in
-/// v1; everything else (tool results, system, last-prompt, attachments, and
-/// whatever ships next week) is ignored without error.
+/// Fold one Claude or Codex transcript line into an update. Everything else
+/// is ignored without error; transcript schemas drift frequently.
 pub fn parse_line(v: &Value, offset: u64, cfg: &Config, up: &mut TranscriptUpdate) {
-    if v.get("type").and_then(Value::as_str) != Some("assistant") {
-        return;
+    match v.get("type").and_then(Value::as_str) {
+        Some("assistant") => parse_claude_line(v, offset, cfg, up),
+        Some("turn_context") => parse_codex_context(v, up),
+        Some("response_item") => parse_codex_response(v, offset, cfg, up),
+        Some("event_msg") => parse_codex_event(v, up),
+        _ => {}
     }
+}
+
+fn parse_claude_line(v: &Value, offset: u64, cfg: &Config, up: &mut TranscriptUpdate) {
     if let Some(m) = v.pointer("/message/model").and_then(Value::as_str) {
         if !m.is_empty() {
             up.model = Some(m.to_string());
@@ -268,10 +311,8 @@ pub fn parse_line(v: &Value, offset: u64, cfg: &Config, up: &mut TranscriptUpdat
                         let s = clip_block(t.trim_end(), cfg.text_snippet_len.max(2000));
                         if !s.is_empty() {
                             up.last_text = Some(s);
-                            up.last_text_at = v
-                                .get("timestamp")
-                                .and_then(Value::as_str)
-                                .map(String::from);
+                            up.last_text_at =
+                                v.get("timestamp").and_then(Value::as_str).map(String::from);
                         }
                     }
                 }
@@ -306,10 +347,146 @@ pub fn parse_line(v: &Value, offset: u64, cfg: &Config, up: &mut TranscriptUpdat
     }
 }
 
+fn parse_codex_context(v: &Value, up: &mut TranscriptUpdate) {
+    if let Some(model) = v
+        .pointer("/payload/model")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        up.model = Some(model.to_string());
+    }
+    if let Some(effort) = v
+        .pointer("/payload/effort")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        up.effort = Some(effort.to_string());
+    }
+}
+
+fn parse_codex_response(v: &Value, offset: u64, cfg: &Config, up: &mut TranscriptUpdate) {
+    let Some(payload) = v.get("payload") else {
+        return;
+    };
+    let kind = payload.get("type").and_then(Value::as_str).unwrap_or("");
+
+    if kind == "message" && payload.get("role").and_then(Value::as_str) == Some("assistant") {
+        for item in payload
+            .get("content")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let text = item.get("text").and_then(Value::as_str).filter(|_| {
+                matches!(
+                    item.get("type").and_then(Value::as_str),
+                    Some("output_text" | "text")
+                )
+            });
+            if let Some(text) = text {
+                let text = clip_block(text.trim_end(), cfg.text_snippet_len.max(2000));
+                if !text.is_empty() {
+                    up.last_text = Some(text);
+                    up.last_text_at = v.get("timestamp").and_then(Value::as_str).map(String::from);
+                }
+            }
+        }
+        return;
+    }
+
+    if !kind.ends_with("_call") {
+        return;
+    }
+    let input = codex_call_input(payload);
+    let name = codex_call_name(payload, kind);
+    up.activities.push(Activity {
+        name,
+        detail: tool_detail(&input),
+        input: clip(&input.to_string(), 400),
+        offset,
+        tool_use_id: codex_call_id(payload).map(String::from),
+    });
+}
+
+fn parse_codex_event(v: &Value, up: &mut TranscriptUpdate) {
+    if v.pointer("/payload/type").and_then(Value::as_str) != Some("token_count") {
+        return;
+    }
+    let Some(usage) = v
+        .pointer("/payload/info/total_token_usage")
+        .or_else(|| v.pointer("/payload/info/last_token_usage"))
+    else {
+        return;
+    };
+    let get = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
+    let usage = TokenUsage {
+        input: get("input_tokens"),
+        cache_read: get("cached_input_tokens"),
+        output: get("output_tokens"),
+    };
+    if usage != TokenUsage::default() {
+        up.usage = Some(usage);
+    }
+}
+
+fn codex_call_id(payload: &Value) -> Option<&str> {
+    payload
+        .get("call_id")
+        .and_then(Value::as_str)
+        .or_else(|| payload.get("id").and_then(Value::as_str))
+}
+
+fn codex_call_name(payload: &Value, kind: &str) -> String {
+    let raw = payload
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| kind.strip_suffix("_call").unwrap_or(kind));
+    raw.rsplit("__")
+        .next()
+        .unwrap_or(raw)
+        .split(['_', '-'])
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            chars.next().map_or_else(String::new, |c| {
+                c.to_uppercase().collect::<String>() + chars.as_str()
+            })
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn codex_call_input(payload: &Value) -> Value {
+    let raw = payload
+        .get("arguments")
+        .or_else(|| payload.get("input"))
+        .or_else(|| payload.get("action"))
+        .unwrap_or(&Value::Null);
+    if let Some(text) = raw.as_str() {
+        serde_json::from_str(text).unwrap_or_else(|_| Value::String(text.to_string()))
+    } else {
+        raw.clone()
+    }
+}
+
 /// The most human-readable bit of a tool input, in priority order.
 fn tool_detail(input: &Value) -> String {
+    if let Some(s) = input.as_str().filter(|s| !s.trim().is_empty()) {
+        if let Some(command) = codex_exec_command(s) {
+            return clip(&command, 64);
+        }
+        return clip(s, 64);
+    }
     const KEYS: &[&str] = &[
-        "description", "file_path", "command", "pattern", "path", "url", "query", "skill",
+        "description",
+        "file_path",
+        "command",
+        "pattern",
+        "path",
+        "url",
+        "query",
+        "skill",
         "prompt",
     ];
     for k in KEYS {
@@ -330,6 +507,18 @@ fn tool_detail(input: &Value) -> String {
         }
     }
     String::new()
+}
+
+/// Codex custom-tool records wrap shell work in a small JavaScript call such
+/// as `tools.exec_command({cmd:"cargo test", ...})`. Pull out its JSON string
+/// value so the unsummarized row is useful instead of showing wrapper code.
+fn codex_exec_command(input: &str) -> Option<String> {
+    let (_, rest) = input.split_once("exec_command(")?;
+    let (_, rest) = rest.split_once("cmd:")?;
+    serde_json::Deserializer::from_str(rest.trim_start())
+        .into_iter::<String>()
+        .next()?
+        .ok()
 }
 
 /// Flatten whitespace and cap length (char-safe).
@@ -363,6 +552,9 @@ pub struct EntryDetail {
 /// with their real newlines (a bash command reads as a script, not as a wall
 /// of \" escapes). Non-objects fall back to pretty JSON.
 fn format_input(input: &Value) -> String {
+    if let Some(text) = input.as_str() {
+        return text.to_string();
+    }
     let Some(obj) = input.as_object() else {
         return serde_json::to_string_pretty(input).unwrap_or_else(|_| input.to_string());
     };
@@ -418,11 +610,7 @@ fn result_text(content: &Value) -> String {
         Value::String(s) => s.clone(),
         Value::Array(items) => items
             .iter()
-            .filter_map(|i| {
-                i.get("text")
-                    .and_then(Value::as_str)
-                    .or_else(|| i.as_str())
-            })
+            .filter_map(|i| i.get("text").and_then(Value::as_str).or_else(|| i.as_str()))
             .collect::<Vec<_>>()
             .join("\n"),
         other => other.to_string(),
@@ -432,7 +620,11 @@ fn result_text(content: &Value) -> String {
 /// Re-read one entry from the transcript at `offset` and pair it with its
 /// tool_result from the following lines (bounded scan). Everything is capped;
 /// None means the entry is no longer readable.
-pub fn read_entry(path: &std::path::Path, offset: u64, tool_use_id: Option<&str>) -> Option<EntryDetail> {
+pub fn read_entry(
+    path: &std::path::Path,
+    offset: u64,
+    tool_use_id: Option<&str>,
+) -> Option<EntryDetail> {
     const READ_CAP: u64 = 1024 * 1024; // entry line + result scan window
     const BLOCK_CAP: usize = 64_000;
     let mut f = std::fs::File::open(path).ok()?;
@@ -448,50 +640,113 @@ pub fn read_entry(path: &std::path::Path, offset: u64, tool_use_id: Option<&str>
         .and_then(Value::as_str)
         .and_then(crate::model::fmt_stamp)
         .map_or((None, None), |(t, d)| (Some(t), Some(d)));
-    let content = v.pointer("/message/content").and_then(Value::as_array)?;
-    let tool = content.iter().find(|i| {
-        i.get("type").and_then(Value::as_str) == Some("tool_use")
-            && (tool_use_id.is_none() || i.get("id").and_then(Value::as_str) == tool_use_id)
-    })?;
-    let id = tool.get("id").and_then(Value::as_str).map(String::from);
-    let prose: String = content
-        .iter()
-        .filter(|i| i.get("type").and_then(Value::as_str) == Some("text"))
-        .filter_map(|i| i.get("text").and_then(Value::as_str))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let input = tool.get("input").unwrap_or(&Value::Null);
-    let input_pretty = clip_block(&format_input(input), BLOCK_CAP);
+    match v.get("type").and_then(Value::as_str) {
+        Some("assistant") => {
+            let content = v.pointer("/message/content").and_then(Value::as_array)?;
+            let tool = content.iter().find(|i| {
+                i.get("type").and_then(Value::as_str) == Some("tool_use")
+                    && (tool_use_id.is_none() || i.get("id").and_then(Value::as_str) == tool_use_id)
+            })?;
+            let id = tool.get("id").and_then(Value::as_str).map(String::from);
+            let prose: String = content
+                .iter()
+                .filter(|i| i.get("type").and_then(Value::as_str) == Some("text"))
+                .filter_map(|i| i.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let input = tool.get("input").unwrap_or(&Value::Null);
+            let input_pretty = clip_block(&format_input(input), BLOCK_CAP);
 
-    // Scan forward for the paired tool_result.
-    let mut result = None;
-    let mut result_error = false;
-    'scan: for line in lines {
-        let Ok(lv) = serde_json::from_str::<Value>(line) else { continue };
-        if lv.get("type").and_then(Value::as_str) != Some("user") {
-            continue;
-        }
-        for item in lv.pointer("/message/content").and_then(Value::as_array).into_iter().flatten() {
-            if item.get("type").and_then(Value::as_str) == Some("tool_result")
-                && (id.is_none()
-                    || item.get("tool_use_id").and_then(Value::as_str) == id.as_deref())
-            {
-                result = item.get("content").map(|c| clip_block(&result_text(c), BLOCK_CAP));
-                result_error = item.get("is_error").and_then(Value::as_bool).unwrap_or(false);
-                break 'scan;
+            let mut result = None;
+            let mut result_error = false;
+            'scan_claude: for line in lines {
+                let Ok(lv) = serde_json::from_str::<Value>(line) else {
+                    continue;
+                };
+                if lv.get("type").and_then(Value::as_str) != Some("user") {
+                    continue;
+                }
+                for item in lv
+                    .pointer("/message/content")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    if item.get("type").and_then(Value::as_str) == Some("tool_result")
+                        && (id.is_none()
+                            || item.get("tool_use_id").and_then(Value::as_str) == id.as_deref())
+                    {
+                        result = item
+                            .get("content")
+                            .map(|c| clip_block(&result_text(c), BLOCK_CAP));
+                        result_error = item
+                            .get("is_error")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false);
+                        break 'scan_claude;
+                    }
+                }
             }
-        }
-    }
 
-    Some(EntryDetail {
-        name: tool.get("name").and_then(Value::as_str).unwrap_or("?").to_string(),
-        time,
-        date,
-        text: (!prose.is_empty()).then(|| clip_block(&prose, BLOCK_CAP)),
-        input: input_pretty,
-        result,
-        result_error,
-    })
+            Some(EntryDetail {
+                name: tool
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?")
+                    .to_string(),
+                time,
+                date,
+                text: (!prose.is_empty()).then(|| clip_block(&prose, BLOCK_CAP)),
+                input: input_pretty,
+                result,
+                result_error,
+            })
+        }
+        Some("response_item") => {
+            let payload = v.get("payload")?;
+            let kind = payload.get("type").and_then(Value::as_str)?;
+            if !kind.ends_with("_call") {
+                return None;
+            }
+            let id = codex_call_id(payload).map(String::from);
+            if tool_use_id.is_some() && id.as_deref() != tool_use_id {
+                return None;
+            }
+            let input = codex_call_input(payload);
+            let mut result = None;
+            let mut result_error = false;
+            for line in lines {
+                let Ok(lv) = serde_json::from_str::<Value>(line) else {
+                    continue;
+                };
+                let Some(lp) = lv.get("payload") else {
+                    continue;
+                };
+                let output_kind = lp.get("type").and_then(Value::as_str).unwrap_or("");
+                if !output_kind.ends_with("_call_output")
+                    || (id.is_some() && lp.get("call_id").and_then(Value::as_str) != id.as_deref())
+                {
+                    continue;
+                }
+                result = lp
+                    .get("output")
+                    .map(|o| clip_block(&result_text(o), BLOCK_CAP));
+                result_error = lp.get("is_error").and_then(Value::as_bool).unwrap_or(false)
+                    || lp.get("status").and_then(Value::as_str) == Some("failed");
+                break;
+            }
+            Some(EntryDetail {
+                name: codex_call_name(payload, kind),
+                time,
+                date,
+                text: None,
+                input: clip_block(&format_input(&input), BLOCK_CAP),
+                result,
+                result_error,
+            })
+        }
+        _ => None,
+    }
 }
 
 /// Resolve a pane's transcript path from its agent-session binding.
@@ -502,12 +757,54 @@ pub fn read_entry(path: &std::path::Path, offset: u64, tool_use_id: Option<&str>
 /// exist, fall back to scanning `~/.claude/projects/*/<id>.jsonl` — session
 /// UUIDs are unique, so one readdir pass is enough and slug-rule drift is
 /// non-fatal.
-pub fn resolve_transcript_path(kind: &str, value: &str, cwd: Option<&str>) -> Option<PathBuf> {
+pub fn resolve_transcript_path(
+    agent: &str,
+    kind: &str,
+    value: &str,
+    cwd: Option<&str>,
+) -> Option<PathBuf> {
+    if kind == "path" {
+        return Some(PathBuf::from(value));
+    }
+    if kind == "id" && agent.eq_ignore_ascii_case("codex") {
+        if let Ok(codex_home) = std::env::var("CODEX_HOME") {
+            let codex_home = PathBuf::from(codex_home);
+            for root in [
+                codex_home.join("sessions"),
+                codex_home.join("archived_sessions"),
+            ] {
+                if let Some(path) = find_codex_transcript(&root, value) {
+                    return Some(path);
+                }
+            }
+        }
+    }
+    let home = std::env::var("HOME").ok()?;
+    resolve_transcript_path_in(std::path::Path::new(&home), agent, kind, value, cwd)
+}
+
+fn resolve_transcript_path_in(
+    home: &std::path::Path,
+    agent: &str,
+    kind: &str,
+    value: &str,
+    cwd: Option<&str>,
+) -> Option<PathBuf> {
     match kind {
         "path" => Some(PathBuf::from(value)),
+        "id" if agent.eq_ignore_ascii_case("codex") => {
+            for root in [
+                home.join(".codex/sessions"),
+                home.join(".codex/archived_sessions"),
+            ] {
+                if let Some(path) = find_codex_transcript(&root, value) {
+                    return Some(path);
+                }
+            }
+            None
+        }
         "id" => {
-            let home = std::env::var("HOME").ok()?;
-            let projects = PathBuf::from(home).join(".claude/projects");
+            let projects = home.join(".claude/projects");
             if let Some(cwd) = cwd {
                 let candidate = projects.join(cwd_slug(cwd)).join(format!("{value}.jsonl"));
                 if candidate.is_file() {
@@ -527,9 +824,39 @@ pub fn resolve_transcript_path(kind: &str, value: &str, cwd: Option<&str>) -> Op
     }
 }
 
+fn find_codex_transcript(root: &std::path::Path, id: &str) -> Option<PathBuf> {
+    let mut dirs = vec![root.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        let mut entries: Vec<_> = std::fs::read_dir(dir).ok()?.flatten().collect();
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let file_type = entry.file_type().ok()?;
+            let path = entry.path();
+            if file_type.is_dir() {
+                dirs.push(path);
+            } else if file_type.is_file()
+                && path.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.contains(id))
+            {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
 pub fn cwd_slug(cwd: &str) -> String {
     cwd.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect()
 }
 
@@ -551,7 +878,10 @@ mod tests {
         ],"usage":{"input_tokens":10,"cache_read_input_tokens":64500,"output_tokens":2500}}});
         let mut up = TranscriptUpdate::default();
         parse_line(&v, 7, &cfg(), &mut up);
-        assert_eq!(up.last_text.as_deref(), Some("Now wiring the socket subscription."));
+        assert_eq!(
+            up.last_text.as_deref(),
+            Some("Now wiring the socket subscription.")
+        );
         assert_eq!(up.last_text_at.as_deref(), Some("2026-08-05T16:27:09.082Z"));
         assert_eq!(up.model.as_deref(), Some("claude-fable-5"));
         assert_eq!(up.effort.as_deref(), Some("high"));
@@ -560,12 +890,63 @@ mod tests {
             .iter()
             .map(|a| (a.name.as_str(), a.detail.as_str()))
             .collect();
-        assert_eq!(brief, vec![("Edit", "/a/b/src/ui.rs"), ("Bash", "Build release")]);
+        assert_eq!(
+            brief,
+            vec![("Edit", "/a/b/src/ui.rs"), ("Bash", "Build release")]
+        );
         // The raw input travels along for the summarizer.
         assert!(up.activities[1].input.contains("cargo build"));
         assert_eq!(
             up.usage,
-            Some(TokenUsage { input: 10, cache_read: 64500, output: 2500 })
+            Some(TokenUsage {
+                input: 10,
+                cache_read: 64500,
+                output: 2500
+            })
+        );
+    }
+
+    #[test]
+    fn codex_context_tools_text_and_usage() {
+        let mut up = TranscriptUpdate::default();
+        for (offset, v) in [
+            json!({"type":"turn_context","payload":{"model":"gpt-5.6-sol","effort":"xhigh"}}),
+            json!({"type":"response_item","timestamp":"2026-08-05T20:00:47.780Z","payload":{
+                "type":"custom_tool_call","name":"exec","call_id":"call_1",
+                "input":"const r = await tools.exec_command({cmd:\"cargo test\"});"
+            }}),
+            json!({"type":"response_item","timestamp":"2026-08-05T20:00:52.674Z","payload":{
+                "type":"message","role":"assistant","phase":"commentary",
+                "content":[{"type":"output_text","text":"Running the regression tests now."}]
+            }}),
+            json!({"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{
+                "input_tokens":39912,"cached_input_tokens":26112,"output_tokens":512
+            }}}}),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            parse_line(&v, offset as u64, &cfg(), &mut up);
+        }
+
+        assert_eq!(up.model.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(up.effort.as_deref(), Some("xhigh"));
+        assert_eq!(
+            up.last_text.as_deref(),
+            Some("Running the regression tests now.")
+        );
+        assert_eq!(up.last_text_at.as_deref(), Some("2026-08-05T20:00:52.674Z"));
+        assert_eq!(up.activities.len(), 1);
+        assert_eq!(up.activities[0].name, "Exec");
+        assert_eq!(up.activities[0].detail, "cargo test");
+        assert_eq!(up.activities[0].tool_use_id.as_deref(), Some("call_1"));
+        assert_eq!(
+            up.usage,
+            Some(TokenUsage {
+                input: 39912,
+                cache_read: 26112,
+                output: 512
+            })
         );
     }
 
@@ -593,6 +974,13 @@ mod tests {
         assert_eq!(tool_detail(&json!({"pattern":"foo.*bar"})), "foo.*bar");
         assert_eq!(tool_detail(&json!({"weird_key":"hello"})), "hello");
         assert_eq!(tool_detail(&json!({"n":42})), "");
+        assert_eq!(tool_detail(&json!("cargo test\n--all")), "cargo test --all");
+        assert_eq!(
+            tool_detail(&json!(
+                r#"const r = await tools.exec_command({cmd:"cargo test\n--all",workdir:"/tmp"});"#
+            )),
+            "cargo test --all"
+        );
         assert_eq!(tool_detail(&Value::Null), "");
     }
 
@@ -662,6 +1050,47 @@ mod tests {
     }
 
     #[test]
+    fn read_entry_pairs_codex_call_with_output() {
+        let dir =
+            std::env::temp_dir().join(format!("herdr-state-codex-entry-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.jsonl");
+        let call = r#"{"type":"response_item","timestamp":"2026-08-05T20:00:47.780Z","payload":{"type":"custom_tool_call","name":"exec","call_id":"call_1","input":"line one\nline two"}}"#;
+        let output = r#"{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_1","output":[{"type":"input_text","text":"Script completed\nall tests passed"}]}}"#;
+        std::fs::write(&path, format!("{call}\n{output}\n")).unwrap();
+
+        let entry = read_entry(&path, 0, Some("call_1")).unwrap();
+        assert_eq!(entry.name, "Exec");
+        assert_eq!(entry.input, "line one\nline two");
+        assert_eq!(
+            entry.result.as_deref(),
+            Some("Script completed\nall tests passed")
+        );
+        assert!(!entry.result_error);
+        assert!(entry.time.is_some() && entry.date.is_some());
+        assert!(read_entry(&path, 0, Some("wrong_call")).is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolves_codex_session_id_in_dated_tree() {
+        let dir =
+            std::env::temp_dir().join(format!("herdr-state-codex-path-{}", std::process::id()));
+        let dated = dir.join(".codex/sessions/2026/08/05");
+        std::fs::create_dir_all(&dated).unwrap();
+        let id = "019fd383-1bde-7b92-905f-e5736f422df0";
+        let transcript = dated.join(format!("rollout-2026-08-05T14-00-12-{id}.jsonl"));
+        std::fs::write(&transcript, "").unwrap();
+
+        assert_eq!(
+            resolve_transcript_path_in(&dir, "codex", "id", id, Some("/some/project")),
+            Some(transcript)
+        );
+        assert!(resolve_transcript_path_in(&dir, "claude", "id", id, None).is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn seed_and_poll_offsets_address_real_lines() {
         let dir = std::env::temp_dir().join(format!("herdr-state-off-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -688,13 +1117,20 @@ mod tests {
             assert!(e.input.contains(&act.detail)); // detail = command here
         }
         // Live append → poll offset also addresses the new line.
-        let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
         std::io::Write::write_all(&mut f, format!("{}\n", mk("three")).as_bytes()).unwrap();
         drop(f);
         let up = poll_file(&mut st, &cfg).unwrap();
         assert_eq!(up.activities.len(), 1);
-        let e = read_entry(&path, up.activities[0].offset, up.activities[0].tool_use_id.as_deref())
-            .unwrap();
+        let e = read_entry(
+            &path,
+            up.activities[0].offset,
+            up.activities[0].tool_use_id.as_deref(),
+        )
+        .unwrap();
         assert!(e.input.contains("three"));
         std::fs::remove_dir_all(&dir).ok();
     }

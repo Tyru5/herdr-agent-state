@@ -52,7 +52,11 @@ pub fn wrap(text: &str, width: usize, max_lines: usize) -> Vec<String> {
     let mut truncated = false;
     for word in text.split_whitespace() {
         let word: String = word.chars().take(width).collect();
-        let need = if cur.is_empty() { word.chars().count() } else { cur.chars().count() + 1 + word.chars().count() };
+        let need = if cur.is_empty() {
+            word.chars().count()
+        } else {
+            cur.chars().count() + 1 + word.chars().count()
+        };
         if need <= width {
             if !cur.is_empty() {
                 cur.push(' ');
@@ -128,7 +132,9 @@ fn block_lines(
 fn is_field_line(line: &str) -> bool {
     !line.starts_with(' ')
         && line.split_once(':').is_some_and(|(k, _)| {
-            !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            !k.is_empty()
+                && k.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
         })
 }
 
@@ -154,7 +160,11 @@ fn push_bold_aware(spans: &mut Vec<Span<'static>>, text: &str, base: Style) {
         if part.is_empty() {
             continue;
         }
-        let style = if i % 2 == 1 { base.add_modifier(Modifier::BOLD) } else { base };
+        let style = if i % 2 == 1 {
+            base.add_modifier(Modifier::BOLD)
+        } else {
+            base
+        };
         spans.push(Span::styled(part.to_string(), style));
     }
 }
@@ -242,7 +252,11 @@ fn card_lines(
                 }
                 Line::from(spans)
             };
-            let busy_w = if busy { " · summarizing…".chars().count() } else { 0 };
+            let busy_w = if busy {
+                " · summarizing…".chars().count()
+            } else {
+                0
+            };
             if g.rows.len() == 1 {
                 let row = format!("▸ {}  {}", g.name, text_of(&g.rows[0]));
                 lines.push(header_line(row, width.saturating_sub(busy_w)));
@@ -321,7 +335,9 @@ fn card_lines(
             if hidden {
                 lines.push(Line::from(Span::styled(
                     "  … press f for the full response",
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::ITALIC),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::ITALIC),
                 )));
             }
             if let Some((time, date)) = &view.last_text_at {
@@ -335,7 +351,12 @@ fn card_lines(
                 ]));
             }
         }
-        if let Some(TokenUsage { input, cache_read, output }) = view.usage {
+        if let Some(TokenUsage {
+            input,
+            cache_read,
+            output,
+        }) = view.usage
+        {
             let mut parts = Vec::new();
             if cache_read > 0 {
                 parts.push(format!("{} cache", fmt_count(cache_read)));
@@ -348,7 +369,10 @@ fn card_lines(
             }
             if !parts.is_empty() {
                 lines.push(Line::default()); // breathing room above the token info
-                lines.push(Line::from(Span::styled(format!("tok {}", parts.join(" · ")), dim)));
+                lines.push(Line::from(Span::styled(
+                    format!("tok {}", parts.join(" · ")),
+                    dim,
+                )));
             }
         }
         if view.stale {
@@ -362,7 +386,9 @@ fn card_lines(
         lines.push(Line::from(Span::styled(
             format!("thinking… {}", fmt_duration(quiet_ms / 1000)),
             // Dark orange (no named ANSI equivalent — truecolor RGB).
-            Style::default().fg(Color::Rgb(0xd2, 0x69, 0x1e)).add_modifier(Modifier::ITALIC),
+            Style::default()
+                .fg(Color::Rgb(0xd2, 0x69, 0x1e))
+                .add_modifier(Modifier::ITALIC),
         )));
     }
 
@@ -448,9 +474,16 @@ pub fn draw(f: &mut Frame, cfg: &Config, st: &mut AppState) {
     let ws = st
         .workspace_label
         .as_deref()
-        .unwrap_or(if st.workspace_id.is_empty() { "?" } else { &st.workspace_id });
+        .unwrap_or(if st.workspace_id.is_empty() {
+            "?"
+        } else {
+            &st.workspace_id
+        });
     let mut header = vec![
-        Span::styled("⏱ agent state", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "⏱ agent state",
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
         Span::styled(format!(" · {ws}  "), Style::default().fg(Color::DarkGray)),
     ];
     if let Conn::Reconnecting(_) = &st.conn {
@@ -470,7 +503,9 @@ pub fn draw(f: &mut Frame, cfg: &Config, st: &mut AppState) {
         if at.elapsed() < std::time::Duration::from_secs(3) {
             header.push(Span::styled(
                 format!("· {msg} "),
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::ITALIC),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::ITALIC),
             ));
         }
     }
@@ -503,7 +538,11 @@ pub fn draw(f: &mut Frame, cfg: &Config, st: &mut AppState) {
     if let Some(d) = &st.detail {
         let interior_w = body.width.saturating_sub(2) as usize;
         let lines = detail_lines(&d.entry, interior_w, d.full);
-        let hint = if d.full { " q back · f trim · ? keys " } else { " q back · f full · ? keys " };
+        let hint = if d.full {
+            " q back · f trim · ? keys "
+        } else {
+            " q back · f full · ? keys "
+        };
         render_windowed(
             f,
             st,
@@ -526,7 +565,9 @@ pub fn draw(f: &mut Frame, cfg: &Config, st: &mut AppState) {
         let msg = "no agent panes in this workspace";
         let y = body.y + body.height / 2;
         f.render_widget(
-            Paragraph::new(Line::from(Span::styled(msg, Style::default().fg(Color::DarkGray))).centered()),
+            Paragraph::new(
+                Line::from(Span::styled(msg, Style::default().fg(Color::DarkGray))).centered(),
+            ),
             Rect::new(body.x, y, body.width, 1),
         );
         return;
@@ -541,7 +582,14 @@ pub fn draw(f: &mut Frame, cfg: &Config, st: &mut AppState) {
         .values()
         .zip(titles)
         .map(|(card, title)| {
-            let lines = card_lines(card, interior_w, st.selected, &st.pending_summaries, st.full_text, cfg);
+            let lines = card_lines(
+                card,
+                interior_w,
+                st.selected,
+                &st.pending_summaries,
+                st.full_text,
+                cfg,
+            );
             let color = status_color(&card.status);
             (Style::default().fg(color), title, card_badge(card), lines)
         })
@@ -568,7 +616,12 @@ fn render_windowed(
     st.viewport = (total, view_h);
     let start = window_start(total, view_h, st.scroll);
 
-    let mut content = Buffer::empty(Rect::new(0, 0, body.width, total.min(u16::MAX as usize) as u16));
+    let mut content = Buffer::empty(Rect::new(
+        0,
+        0,
+        body.width,
+        total.min(u16::MAX as usize) as u16,
+    ));
     let mut y: u16 = 0;
     for (style, title, right, lines) in blocks {
         let h = lines.len() as u16 + 2;
@@ -603,19 +656,35 @@ fn render_windowed(
 pub fn keybinds(cfg: &Config) -> Vec<(&'static str, String, &'static str)> {
     let s = |t: &str| t.to_string();
     vec![
-        ("j / k ↑↓", s("move cursor across groups and rows"), "navigate"),
-        ("enter/space", s("expand group · open row's entry detail"), "navigate"),
+        (
+            "j / k ↑↓",
+            s("move cursor across groups and rows"),
+            "navigate",
+        ),
+        (
+            "enter/space",
+            s("expand group · open row's entry detail"),
+            "navigate",
+        ),
         ("h / l ←→", s("fold the selected group"), "navigate"),
         ("e", s("expand / collapse all groups"), "navigate"),
         ("J / K", s("scroll history by line"), "history"),
         ("PgUp / PgDn", s("scroll history by page"), "history"),
         ("g / G", s("jump to start · return to live tail"), "history"),
-        ("f", s("full / trimmed content (detail + last response)"), "content"),
+        (
+            "f",
+            s("full / trimmed content (detail + last response)"),
+            "content",
+        ),
         ("x", s("export update log to Markdown"), "actions"),
         ("o", s("focus the agent's pane"), "actions"),
         ("?", s("this panel"), "actions"),
         ("q", s("back (detail/panel) · quit (card view)"), "actions"),
-        ("", format!("{} toggles this pane (herdr keybind)", cfg.key_hint), "actions"),
+        (
+            "",
+            format!("{} toggles this pane (herdr keybind)", cfg.key_hint),
+            "actions",
+        ),
     ]
 }
 
@@ -629,14 +698,32 @@ pub fn settings_lines(cfg: &Config) -> Vec<(String, String)> {
     };
     vec![
         ("poll_ms".into(), format!("{} ms", cfg.poll_ms)),
-        ("status_poll_ms".into(), format!("{} ms", cfg.status_poll_ms)),
-        ("thinking_after_ms".into(), format!("{} ms", cfg.thinking_after_ms)),
+        (
+            "status_poll_ms".into(),
+            format!("{} ms", cfg.status_poll_ms),
+        ),
+        (
+            "thinking_after_ms".into(),
+            format!("{} ms", cfg.thinking_after_ms),
+        ),
         ("tail_bytes".into(), format!("{}", cfg.tail_bytes)),
-        ("max_activity".into(), format!("{} per summary batch", cfg.max_activity)),
-        ("text_snippet_len".into(), format!("{} chars", cfg.text_snippet_len)),
+        (
+            "max_activity".into(),
+            format!("{} per summary batch", cfg.max_activity),
+        ),
+        (
+            "text_snippet_len".into(),
+            format!("{} chars", cfg.text_snippet_len),
+        ),
         ("summarizer".into(), cfg.summarizer.clone()),
-        ("summary_model".into(), format!("{} (claude)", cfg.summary_model)),
-        ("codex_summary_model".into(), format!("{} (codex)", cfg.codex_summary_model)),
+        (
+            "summary_model".into(),
+            format!("{} (claude)", cfg.summary_model),
+        ),
+        (
+            "codex_summary_model".into(),
+            format!("{} (codex)", cfg.codex_summary_model),
+        ),
         ("show_all_panes".into(), cfg.show_all_panes.to_string()),
         ("export_dir".into(), export),
         ("toggle key".into(), cfg.key_hint.clone()),
@@ -688,7 +775,11 @@ fn draw_help(
 
     // Section bodies.
     let binds = keybinds(cfg);
-    let key_w = binds.iter().map(|(k, _, _)| k.chars().count()).max().unwrap_or(0);
+    let key_w = binds
+        .iter()
+        .map(|(k, _, _)| k.chars().count())
+        .max()
+        .unwrap_or(0);
     let mut keybind_body: Vec<Line> = Vec::new();
     let mut section = "";
     for (key, action, sec) in &binds {
@@ -699,7 +790,9 @@ fn draw_help(
             section = sec;
             keybind_body.push(Line::from(Span::styled(
                 sec.to_string(),
-                Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
             )));
         }
         keybind_body.push(Line::from(vec![
@@ -708,7 +801,11 @@ fn draw_help(
         ]));
     }
     let settings = settings_lines(cfg);
-    let set_w = settings.iter().map(|(k, _)| k.chars().count()).max().unwrap_or(0);
+    let set_w = settings
+        .iter()
+        .map(|(k, _)| k.chars().count())
+        .max()
+        .unwrap_or(0);
     let settings_body: Vec<Line> = std::iter::once(Line::from(Span::styled(
         "effective config (edit state.conf to change)",
         dim,
@@ -724,13 +821,20 @@ fn draw_help(
     let about_body: Vec<Line> = about_lines(update).into_iter().map(Line::from).collect();
 
     let tabs = ["keybinds", "settings", "about"];
-    let sections: Vec<(bool, Vec<Line>)> =
-        vec![(false, keybind_body), (false, settings_body), (true, about_body)];
+    let sections: Vec<(bool, Vec<Line>)> = vec![
+        (false, keybind_body),
+        (false, settings_body),
+        (true, about_body),
+    ];
     let tab_i = panel.tab.min(sections.len() - 1);
 
     // Geometry.
-    let w = 66u16.min(area.width.saturating_sub(2)).max(30.min(area.width));
-    let h = 22u16.min(area.height.saturating_sub(1)).max(8.min(area.height));
+    let w = 66u16
+        .min(area.width.saturating_sub(2))
+        .max(30.min(area.width));
+    let h = 22u16
+        .min(area.height.saturating_sub(1))
+        .max(8.min(area.height));
     let rect = Rect::new(
         area.x + (area.width.saturating_sub(w)) / 2,
         area.y + (area.height.saturating_sub(h)) / 2,
@@ -757,7 +861,10 @@ fn draw_help(
     let mut tab_spans: Vec<Span> = Vec::new();
     for (i, label) in tabs.iter().enumerate() {
         let style = if i == tab_i {
-            Style::default().fg(Color::Black).bg(Color::Magenta).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Magenta)
+                .add_modifier(Modifier::BOLD)
         } else {
             dim
         };
@@ -789,26 +896,33 @@ fn draw_help(
 /// The detail view body: timestamp, assistant prose, pretty input, result.
 /// `full=false` truncates each section to a screenful with a "press f"
 /// marker; `full=true` hard-wraps everything so no content is lost.
-fn detail_lines(e: &crate::transcript::EntryDetail, width: usize, full: bool) -> Vec<Line<'static>> {
+fn detail_lines(
+    e: &crate::transcript::EntryDetail,
+    width: usize,
+    full: bool,
+) -> Vec<Line<'static>> {
     const SECTION_LINES: usize = 20;
     let label = Style::default().fg(Color::Green);
     let dim = Style::default().fg(Color::DarkGray);
     let w = width.saturating_sub(2);
     let mut lines: Vec<Line> = Vec::new();
-    let push_styled = |lines: &mut Vec<Line<'static>>, text: &str, styler: &dyn Fn(&str) -> Style| {
-        let (block, hidden) = block_lines(text, w, SECTION_LINES, full, styler);
-        for l in block {
-            let mut spans = vec![Span::raw("  ")];
-            spans.extend(l.spans);
-            lines.push(Line::from(spans));
-        }
-        if hidden {
-            lines.push(Line::from(Span::styled(
-                "  … truncated — press f for full content",
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::ITALIC),
-            )));
-        }
-    };
+    let push_styled =
+        |lines: &mut Vec<Line<'static>>, text: &str, styler: &dyn Fn(&str) -> Style| {
+            let (block, hidden) = block_lines(text, w, SECTION_LINES, full, styler);
+            for l in block {
+                let mut spans = vec![Span::raw("  ")];
+                spans.extend(l.spans);
+                lines.push(Line::from(spans));
+            }
+            if hidden {
+                lines.push(Line::from(Span::styled(
+                    "  … truncated — press f for full content",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::ITALIC),
+                )));
+            }
+        };
     let push_block = |lines: &mut Vec<Line<'static>>, text: &str, style: Style| {
         push_styled(lines, text, &move |_| style);
     };
@@ -823,7 +937,11 @@ fn detail_lines(e: &crate::transcript::EntryDetail, width: usize, full: bool) ->
     if let Some(text) = &e.text {
         lines.push(Line::default());
         lines.push(Line::from(Span::styled("said:", label)));
-        push_block(&mut lines, text, Style::default().add_modifier(Modifier::ITALIC));
+        push_block(
+            &mut lines,
+            text,
+            Style::default().add_modifier(Modifier::ITALIC),
+        );
     }
     lines.push(Line::default());
     lines.push(Line::from(Span::styled("input:", label)));
@@ -845,12 +963,19 @@ fn detail_lines(e: &crate::transcript::EntryDetail, width: usize, full: bool) ->
                 label
             };
             lines.push(Line::from(Span::styled(
-                if e.result_error { "result (error):" } else { "result:" },
+                if e.result_error {
+                    "result (error):"
+                } else {
+                    "result:"
+                },
                 style,
             )));
             push_block(&mut lines, result, dim);
         }
-        None => lines.push(Line::from(Span::styled("result: (not found — still running?)", dim))),
+        None => lines.push(Line::from(Span::styled(
+            "result: (not found — still running?)",
+            dim,
+        ))),
     }
     lines
 }
@@ -945,7 +1070,10 @@ mod tests {
 
     #[test]
     fn block_lines_wraps_always_and_trim_caps_rendered_height() {
-        let text = (0..30).map(|i| format!("line{i}")).collect::<Vec<_>>().join("\n");
+        let text = (0..30)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let (lines, hidden) = block_lines(&text, 40, 20, false, |_| Style::default());
         assert_eq!(lines.len(), 20);
         assert!(hidden);
@@ -978,10 +1106,15 @@ mod tests {
         let cfg = Config::default();
         let binds = keybinds(&cfg);
         for key in ["j / k ↑↓", "x", "o", "f", "?", "g / G"] {
-            assert!(binds.iter().any(|(k, _, _)| *k == key), "missing bind {key}");
+            assert!(
+                binds.iter().any(|(k, _, _)| *k == key),
+                "missing bind {key}"
+            );
         }
         let settings = settings_lines(&cfg);
-        assert!(settings.iter().any(|(k, v)| k == "summarizer" && v == "auto"));
+        assert!(settings
+            .iter()
+            .any(|(k, v)| k == "summarizer" && v == "auto"));
         assert!(settings.iter().any(|(k, _)| k == "export_dir"));
         let about = about_lines(None);
         assert!(about[0] == "herdr-agent-state");
@@ -991,7 +1124,9 @@ mod tests {
         assert!(!about.iter().any(|l| l.contains("plugin install")));
         let with = about_lines(Some("0.2.0"));
         assert!(with.iter().any(|l| l.contains("Update available: v0.2.0")));
-        assert!(with.iter().any(|l| l == "herdr plugin install Tyru5/herdr-agent-state"));
+        assert!(with
+            .iter()
+            .any(|l| l == "herdr plugin install Tyru5/herdr-agent-state"));
     }
 
     #[test]
@@ -1000,7 +1135,11 @@ mod tests {
         let line = inline_md("run `cargo test` for **all** checks", base);
         let texts: Vec<&str> = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(texts.join(""), "run cargo test for all checks");
-        let code = line.spans.iter().find(|s| s.content == "cargo test").unwrap();
+        let code = line
+            .spans
+            .iter()
+            .find(|s| s.content == "cargo test")
+            .unwrap();
         assert_eq!(code.style.fg, Some(Color::Cyan));
         let bold = line.spans.iter().find(|s| s.content == "all").unwrap();
         assert!(bold.style.add_modifier.contains(Modifier::BOLD));
@@ -1022,7 +1161,12 @@ mod tests {
         let all = card_lines(&card, 60, None, &none, true, &cfg);
         let flat: Vec<String> = all
             .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.clone()).collect::<String>())
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.clone())
+                    .collect::<String>()
+            })
             .collect();
         let i = flat.iter().position(|l| l.contains("Para one.")).unwrap();
         assert_eq!(flat[i + 1], ""); // blank paragraph break survives
@@ -1043,5 +1187,4 @@ mod tests {
         card.effort = Some("high".into());
         assert_eq!(card_name(&card), "claude-fable-5 (high) · herdr-state");
     }
-
 }

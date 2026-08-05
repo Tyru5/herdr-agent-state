@@ -53,8 +53,7 @@ fn pick_backend(pref: &str) -> Option<Backend> {
         std::env::var_os("PATH").is_some_and(|paths| {
             std::env::split_paths(&paths).any(|dir| {
                 let p = dir.join(bin);
-                p.is_file()
-                    || std::fs::metadata(&p).is_ok_and(|m| !m.is_dir())
+                p.is_file() || std::fs::metadata(&p).is_ok_and(|m| !m.is_dir())
             })
         })
     };
@@ -84,7 +83,11 @@ const MAX_CHUNKS_PER_PANE: usize = 4;
 
 /// Split a pane's items into newest-first chunks of `chunk` items, keeping at
 /// most `max_chunks`; everything older is returned as dropped ids.
-fn plan_batches(mut items: Vec<SumItem>, chunk: usize, max_chunks: usize) -> (Vec<Vec<SumItem>>, Vec<u64>) {
+fn plan_batches(
+    mut items: Vec<SumItem>,
+    chunk: usize,
+    max_chunks: usize,
+) -> (Vec<Vec<SumItem>>, Vec<u64>) {
     let chunk = chunk.max(1);
     let mut chunks: Vec<Vec<SumItem>> = Vec::new();
     while !items.is_empty() && chunks.len() < max_chunks {
@@ -152,7 +155,11 @@ fn run(tx: &Sender<Ev>, reqs: &Receiver<SumReq>, backend: Backend, cfg: &Config)
 }
 
 /// One CLI call for one batch. Returns (activity id, summary) pairs.
-fn summarize_batch(backend: Backend, cfg: &Config, items: &[SumItem]) -> Option<Vec<(u64, String)>> {
+fn summarize_batch(
+    backend: Backend,
+    cfg: &Config,
+    items: &[SumItem],
+) -> Option<Vec<(u64, String)>> {
     let prompt = build_prompt(items);
     let output = match backend {
         Backend::Claude => Command::new("claude")
@@ -162,7 +169,12 @@ fn summarize_batch(backend: Backend, cfg: &Config, items: &[SumItem]) -> Option<
         // --skip-git-repo-check: the pane's cwd (plugin root) need not be a
         // repo, and codex exec refuses to run outside one by default.
         Backend::Codex => Command::new("codex")
-            .args(["exec", "-m", &cfg.codex_summary_model, "--skip-git-repo-check"])
+            .args([
+                "exec",
+                "-m",
+                &cfg.codex_summary_model,
+                "--skip-git-repo-check",
+            ])
             .arg(&prompt)
             .output(),
     }

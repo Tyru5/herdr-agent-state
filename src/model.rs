@@ -265,7 +265,9 @@ impl AppState {
         Self {
             workspace_id,
             workspace_label: None,
-            self_pane_id: std::env::var("HERDR_PANE_ID").ok().filter(|s| !s.is_empty()),
+            self_pane_id: std::env::var("HERDR_PANE_ID")
+                .ok()
+                .filter(|s| !s.is_empty()),
             cards: BTreeMap::new(),
             conn: Conn::Reconnecting("connecting…".into()),
             scroll: ScrollPos::Follow,
@@ -302,7 +304,10 @@ impl AppState {
     /// last response, tokens — as a Markdown document.
     pub fn export_markdown(&self) -> String {
         let now = chrono::Local::now();
-        let ws = self.workspace_label.as_deref().unwrap_or(&self.workspace_id);
+        let ws = self
+            .workspace_label
+            .as_deref()
+            .unwrap_or(&self.workspace_id);
         let mut md = format!(
             "# agent state · {ws}\n\nexported: {}\n",
             now.format("%Y-%m-%d %H:%M:%S")
@@ -322,7 +327,9 @@ impl AppState {
             if let Some(title) = card.title.as_deref().filter(|t| !t.is_empty()) {
                 md.push_str(&format!("- task: {title}\n"));
             }
-            let Some(view) = &card.transcript else { continue };
+            let Some(view) = &card.transcript else {
+                continue;
+            };
             if !view.groups.is_empty() {
                 md.push_str("\n### Steps\n\n");
                 fn text_of(r: &ActivityRow) -> &str {
@@ -425,7 +432,10 @@ impl AppState {
         if let Some(workspaces) = snap.get("workspaces").and_then(Value::as_array) {
             self.workspace_label = workspaces
                 .iter()
-                .find(|w| w.get("workspace_id").and_then(Value::as_str) == Some(self.workspace_id.as_str()))
+                .find(|w| {
+                    w.get("workspace_id").and_then(Value::as_str)
+                        == Some(self.workspace_id.as_str())
+                })
                 .and_then(|w| w.get("label").and_then(Value::as_str))
                 .filter(|s| !s.is_empty())
                 .map(String::from);
@@ -438,15 +448,22 @@ impl AppState {
             .or_else(|| snap.get("agents").and_then(Value::as_array));
         let mut next: BTreeMap<String, AgentCard> = BTreeMap::new();
         for pane in panes.into_iter().flatten() {
-            let pane_id = pane.get("pane_id").and_then(Value::as_str).unwrap_or("").to_string();
+            let pane_id = pane
+                .get("pane_id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
             self.note_focus(&pane_id, pane.get("focused").and_then(Value::as_bool));
             // Keep known cards through agent-field flicker (see `belongs`).
-            let keep = self.wanted(pane, cfg)
-                || (self.belongs(pane) && self.cards.contains_key(&pane_id));
+            let keep =
+                self.wanted(pane, cfg) || (self.belongs(pane) && self.cards.contains_key(&pane_id));
             if !keep {
                 continue;
             }
-            let mut card = self.cards.remove(&pane_id).unwrap_or_else(|| AgentCard::new(pane_id.clone()));
+            let mut card = self
+                .cards
+                .remove(&pane_id)
+                .unwrap_or_else(|| AgentCard::new(pane_id.clone()));
             update_card_from_pane(&mut card, pane, &mut effects, cfg);
             next.insert(pane_id, card);
         }
@@ -492,7 +509,9 @@ impl AppState {
             "pane_agent_status_changed" => {
                 // Thin payload: no agent_session here — binding arrives via
                 // snapshot / pane_updated.
-                if data.get("workspace_id").and_then(Value::as_str) != Some(self.workspace_id.as_str()) {
+                if data.get("workspace_id").and_then(Value::as_str)
+                    != Some(self.workspace_id.as_str())
+                {
                     return effects;
                 }
                 let pane_id = data.get("pane_id").and_then(Value::as_str).unwrap_or("");
@@ -509,7 +528,9 @@ impl AppState {
                 // The pane just became interesting; a re-snapshot picks up its
                 // full PaneInfo (incl. session binding) on the next tick,
                 // through the shared debounce — this event can fire in bursts.
-                if data.get("workspace_id").and_then(Value::as_str) == Some(self.workspace_id.as_str()) {
+                if data.get("workspace_id").and_then(Value::as_str)
+                    == Some(self.workspace_id.as_str())
+                {
                     self.pending_resnapshot = true;
                 }
             }
@@ -543,7 +564,9 @@ impl AppState {
     /// been gone for 3 consecutive reconciles.
     pub fn apply_agents(&mut self, agents: &Value, cfg: &Config) -> Effects {
         let mut effects = Effects::default();
-        let Some(list) = agents.as_array() else { return effects };
+        let Some(list) = agents.as_array() else {
+            return effects;
+        };
         let mut seen: Vec<String> = Vec::new();
         for entry in list {
             // Entries are pane-shaped (pane_id, workspace_id, agent,
@@ -586,6 +609,7 @@ impl AppState {
         if !self.cards.contains_key(pane_id) {
             return Vec::new();
         }
+        let observable_activity = !up.activities.is_empty() || up.last_text.is_some();
         let base_id = self.next_activity_id;
         self.next_activity_id += up.activities.len() as u64;
         // Group ids need the counter too: reserve one per activity (rows) and
@@ -599,7 +623,11 @@ impl AppState {
         let mut work = Vec::new();
         for (i, act) in up.activities.into_iter().enumerate() {
             let id = base_id + i as u64;
-            work.push(SumItem { id, name: act.name.clone(), input: act.input });
+            work.push(SumItem {
+                id,
+                name: act.name.clone(),
+                input: act.input,
+            });
             let row = ActivityRow {
                 id,
                 name: act.name.clone(),
@@ -634,17 +662,13 @@ impl AppState {
             view.last_text = up.last_text;
             // Transcript timestamp when present; receipt time otherwise —
             // live tailing makes the two nearly identical anyway.
-            view.last_text_at = up
-                .last_text_at
-                .as_deref()
-                .and_then(fmt_stamp)
-                .or_else(|| {
-                    let now = chrono::Local::now();
-                    Some((
-                        now.format("%H:%M:%S").to_string(),
-                        now.format("%Y-%m-%d").to_string(),
-                    ))
-                });
+            view.last_text_at = up.last_text_at.as_deref().and_then(fmt_stamp).or_else(|| {
+                let now = chrono::Local::now();
+                Some((
+                    now.format("%H:%M:%S").to_string(),
+                    now.format("%Y-%m-%d").to_string(),
+                ))
+            });
         }
         if up.usage.is_some() {
             view.usage = up.usage;
@@ -656,7 +680,7 @@ impl AppState {
         if up.effort.is_some() {
             card.effort = up.effort;
         }
-        if !work.is_empty() {
+        if observable_activity {
             card.last_activity = Instant::now();
         }
         work
@@ -669,7 +693,11 @@ impl AppState {
         for (id, _) in &outcome {
             self.pending_summaries.remove(id);
         }
-        let Some(view) = self.cards.get_mut(pane_id).and_then(|c| c.transcript.as_mut()) else {
+        let Some(view) = self
+            .cards
+            .get_mut(pane_id)
+            .and_then(|c| c.transcript.as_mut())
+        else {
             return;
         };
         for (id, text) in outcome {
@@ -711,7 +739,9 @@ impl AppState {
             self.selected = None;
             return;
         }
-        let pos = self.selected.and_then(|s| targets.iter().position(|&t| t == s));
+        let pos = self
+            .selected
+            .and_then(|s| targets.iter().position(|&t| t == s));
         self.selected = Some(match (pos, forward) {
             (None, true) => targets[0],
             (None, false) => *targets.last().unwrap(),
@@ -730,8 +760,14 @@ impl AppState {
             }
             Some(SelTarget::Row(id)) => {
                 for card in self.cards.values() {
-                    let Some(view) = card.transcript.as_ref() else { continue };
-                    let Some(row) = view.groups.iter().flat_map(|g| g.rows.iter()).find(|r| r.id == id)
+                    let Some(view) = card.transcript.as_ref() else {
+                        continue;
+                    };
+                    let Some(row) = view
+                        .groups
+                        .iter()
+                        .flat_map(|g| g.rows.iter())
+                        .find(|r| r.id == id)
                     else {
                         continue;
                     };
@@ -764,7 +800,11 @@ impl AppState {
             ScrollPos::At(t) => t.min(max_top),
         };
         let next = (cur as i64 + delta).clamp(0, max_top as i64) as usize;
-        self.scroll = if next >= max_top { ScrollPos::Follow } else { ScrollPos::At(next) };
+        self.scroll = if next >= max_top {
+            ScrollPos::Follow
+        } else {
+            ScrollPos::At(next)
+        };
     }
 
     /// Page = one viewport minus a line of overlap.
@@ -815,7 +855,11 @@ impl AppState {
 
     /// Open/close the entry detail view.
     pub fn open_detail(&mut self, entry: crate::transcript::EntryDetail, agent_pane: String) {
-        self.detail = Some(Detail { entry, agent_pane, full: false });
+        self.detail = Some(Detail {
+            entry,
+            agent_pane,
+            full: false,
+        });
         self.scroll = ScrollPos::At(0);
     }
 
@@ -851,7 +895,11 @@ impl AppState {
 /// `PaneInfo` and the thin `pane_agent_status_changed` payload — missing
 /// fields leave the card untouched.
 fn update_card_from_pane(card: &mut AgentCard, pane: &Value, effects: &mut Effects, _cfg: &Config) {
-    let get_str = |k: &str| pane.get(k).and_then(Value::as_str).filter(|s| !s.is_empty());
+    let get_str = |k: &str| {
+        pane.get(k)
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+    };
 
     if let Some(agent) = get_str("agent") {
         card.agent = Some(agent.to_string());
@@ -882,14 +930,33 @@ fn update_card_from_pane(card: &mut AgentCard, pane: &Value, effects: &mut Effec
         card.cwd = Some(cwd.to_string());
     }
     if let Some(session) = pane.get("agent_session").and_then(Value::as_object) {
+        let session_agent = session
+            .get("agent")
+            .and_then(Value::as_str)
+            .or(card.agent.as_deref())
+            .unwrap_or("");
         let kind = session.get("kind").and_then(Value::as_str).unwrap_or("");
         let value = session.get("value").and_then(Value::as_str).unwrap_or("");
         if !kind.is_empty() && !value.is_empty() {
-            let new_ref = SessionRef { kind: kind.into(), value: value.into() };
-            if card.session.as_ref() != Some(&new_ref) {
+            let new_ref = SessionRef {
+                kind: kind.into(),
+                value: value.into(),
+            };
+            let changed = card.session.as_ref() != Some(&new_ref);
+            if changed {
                 card.session = Some(new_ref);
+                if card.transcript_path.take().is_some() {
+                    effects.tailer.push(TailerCmd::Drop(card.pane_id.clone()));
+                }
+                card.transcript = None;
+                card.model = None;
+                card.effort = None;
+            }
+            // A binding can arrive just before its transcript file. Retry an
+            // unresolved binding on later snapshots/agent-list polls.
+            if card.transcript_path.is_none() {
                 if let Some(path) =
-                    resolve_transcript_path(kind, value, card.cwd.as_deref())
+                    resolve_transcript_path(session_agent, kind, value, card.cwd.as_deref())
                 {
                     card.transcript_path = Some(path.clone());
                     effects.tailer.push(TailerCmd::Watch {
@@ -973,7 +1040,10 @@ mod tests {
     #[test]
     fn show_all_panes_includes_agentless() {
         let mut st = state("w1");
-        let cfg = Config { show_all_panes: true, ..Config::default() };
+        let cfg = Config {
+            show_all_panes: true,
+            ..Config::default()
+        };
         let snap = json!({"panes": [pane("w1:p2", "w1", None)]});
         st.ingest_snapshot(&snap, &cfg);
         assert!(st.cards.contains_key("w1:p2"));
@@ -987,8 +1057,10 @@ mod tests {
         p["agent_session"] = json!({"agent":"claude","kind":"path","source":"herdr:claude",
                                     "value":"/tmp/whatever.jsonl"});
         let fx = st.ingest_snapshot(&json!({"panes":[p.clone()]}), &cfg);
-        assert!(matches!(fx.tailer.as_slice(), [TailerCmd::Watch { pane_id, path }]
-            if pane_id == "w1:p1" && path.to_str() == Some("/tmp/whatever.jsonl")));
+        assert!(
+            matches!(fx.tailer.as_slice(), [TailerCmd::Watch { pane_id, path }]
+            if pane_id == "w1:p1" && path.to_str() == Some("/tmp/whatever.jsonl"))
+        );
         // Same binding again → no duplicate watch.
         let fx = st.apply_event(&json!({"event":"pane_updated","data":{"pane": p}}), &cfg);
         assert!(fx.tailer.is_empty());
@@ -1029,7 +1101,7 @@ mod tests {
         let c = &st.cards["w1:p1"];
         assert_eq!(c.agent.as_deref(), Some("claude")); // survived
         assert_eq!(c.title.as_deref(), Some("Still at it")); // merged
-        // Same flicker inside a snapshot: card also survives.
+                                                             // Same flicker inside a snapshot: card also survives.
         st.ingest_snapshot(&json!({"panes":[pane("w1:p1","w1",None)]}), &cfg);
         assert!(st.cards.contains_key("w1:p1"));
         // But a truly new agent-less pane still doesn't appear.
@@ -1042,7 +1114,10 @@ mod tests {
         let mut st = state("w1");
         let cfg = Config::default();
         st.ingest_snapshot(&json!({"panes":[pane("w1:p1","w1",Some("claude"))]}), &cfg);
-        let fx = st.apply_event(&json!({"event":"pane_closed","data":{"pane_id":"w1:p1"}}), &cfg);
+        let fx = st.apply_event(
+            &json!({"event":"pane_closed","data":{"pane_id":"w1:p1"}}),
+            &cfg,
+        );
         assert!(st.cards.is_empty());
         assert!(matches!(fx.tailer.as_slice(), [TailerCmd::Drop(p)] if p == "w1:p1"));
     }
@@ -1080,13 +1155,19 @@ mod tests {
     fn full_history_retained_and_yields_summary_work() {
         let mut st = state("w1");
         // max_activity no longer evicts history — it only caps summarizer batches.
-        let cfg = Config { max_activity: 2, ..Config::default() };
+        let cfg = Config {
+            max_activity: 2,
+            ..Config::default()
+        };
         st.ingest_snapshot(&json!({"panes":[pane("w1:p1","w1",Some("claude"))]}), &cfg);
         let mut all_work = Vec::new();
         for i in 0..4 {
             let work = st.apply_transcript(
                 "w1:p1",
-                TranscriptUpdate { activities: vec![tool(&format!("T{i}"))], ..Default::default() },
+                TranscriptUpdate {
+                    activities: vec![tool(&format!("T{i}"))],
+                    ..Default::default()
+                },
                 &cfg,
             );
             assert_eq!(work.len(), 1);
@@ -1100,7 +1181,7 @@ mod tests {
             .map(|r| r.name.as_str())
             .collect();
         assert_eq!(names, vec!["T0", "T1", "T2", "T3"]); // nothing dropped
-        // Ids are unique and monotonic across batches.
+                                                         // Ids are unique and monotonic across batches.
         let ids: Vec<_> = all_work.iter().map(|w| w.id).collect();
         assert_eq!(ids, vec![0, 1, 2, 3]);
     }
@@ -1115,9 +1196,15 @@ mod tests {
         st.ingest_snapshot(&json!({"panes":[me]}), &cfg);
         assert!(st.self_focused);
         // Someone else takes focus.
-        st.apply_event(&json!({"event":"pane_focused","data":{"pane_id":"w1:p1"}}), &cfg);
+        st.apply_event(
+            &json!({"event":"pane_focused","data":{"pane_id":"w1:p1"}}),
+            &cfg,
+        );
         assert!(!st.self_focused);
-        st.apply_event(&json!({"event":"pane_focused","data":{"pane_id":"w1:p9"}}), &cfg);
+        st.apply_event(
+            &json!({"event":"pane_focused","data":{"pane_id":"w1:p9"}}),
+            &cfg,
+        );
         assert!(st.self_focused);
     }
 
@@ -1155,14 +1242,27 @@ mod tests {
         st.apply_transcript(
             "w1:p1",
             TranscriptUpdate {
-                activities: vec![tool("Edit"), tool("Edit"), tool("Bash"), tool("Bash"), tool("Read")],
+                activities: vec![
+                    tool("Edit"),
+                    tool("Edit"),
+                    tool("Bash"),
+                    tool("Bash"),
+                    tool("Read"),
+                ],
                 ..Default::default()
             },
             &cfg,
         );
         let folded = |st: &AppState| -> Vec<bool> {
-            st.cards["w1:p1"].transcript.as_ref().unwrap().groups.iter()
-                .filter(|g| g.rows.len() >= 2).map(|g| g.expanded).collect()
+            st.cards["w1:p1"]
+                .transcript
+                .as_ref()
+                .unwrap()
+                .groups
+                .iter()
+                .filter(|g| g.rows.len() >= 2)
+                .map(|g| g.expanded)
+                .collect()
         };
         assert_eq!(folded(&st), vec![false, false]);
         st.expand_all();
@@ -1206,7 +1306,13 @@ mod tests {
         st.apply_transcript(
             "w1:p1",
             TranscriptUpdate {
-                activities: vec![tool("Edit"), tool("Edit"), tool("Edit"), tool("Bash"), tool("Edit")],
+                activities: vec![
+                    tool("Edit"),
+                    tool("Edit"),
+                    tool("Edit"),
+                    tool("Bash"),
+                    tool("Edit"),
+                ],
                 ..Default::default()
             },
             &cfg,
@@ -1218,14 +1324,20 @@ mod tests {
             .map(|g| (g.name.as_str(), g.rows.len(), g.expanded))
             .collect();
         // Runs fold; a different tool breaks the run; collapsed by default.
-        assert_eq!(shape, vec![("Edit", 3, false), ("Bash", 1, false), ("Edit", 1, false)]);
+        assert_eq!(
+            shape,
+            vec![("Edit", 3, false), ("Bash", 1, false), ("Edit", 1, false)]
+        );
 
         // Cursor walks: [Group(Edit x3), Row(Bash), Row(Edit)] while collapsed.
         st.select_step(true);
         let sel = st.selected.expect("selectable target");
         assert!(matches!(sel, SelTarget::Group(_)));
         st.fold_selected();
-        let gid = match sel { SelTarget::Group(id) => id, _ => unreachable!() };
+        let gid = match sel {
+            SelTarget::Group(id) => id,
+            _ => unreachable!(),
+        };
         let view = st.cards["w1:p1"].transcript.as_ref().unwrap();
         let g = view.groups.iter().find(|g| g.id == gid).unwrap();
         assert!(g.expanded && g.rows.len() == 3);
@@ -1240,7 +1352,9 @@ mod tests {
         // Cursor clamps at the ends instead of wrapping.
         st.select_step(false);
         assert_eq!(st.selected, Some(SelTarget::Group(gid)));
-        for _ in 0..9 { st.select_step(true); }
+        for _ in 0..9 {
+            st.select_step(true);
+        }
         st.select_step(true); // clamped at the last row
         assert!(matches!(st.selected, Some(SelTarget::Row(_))));
     }
@@ -1248,7 +1362,10 @@ mod tests {
     #[test]
     fn summaries_attach_by_id_and_skip_unknown() {
         let mut st = state("w1");
-        let cfg = Config { max_activity: 2, ..Config::default() };
+        let cfg = Config {
+            max_activity: 2,
+            ..Config::default()
+        };
         st.ingest_snapshot(&json!({"panes":[pane("w1:p1","w1",Some("claude"))]}), &cfg);
         st.apply_transcript(
             "w1:p1",
@@ -1279,7 +1396,10 @@ mod tests {
             .flat_map(|g| g.rows.iter())
             .map(|r| (r.name.as_str(), r.summary.as_deref()))
             .collect();
-        assert_eq!(got, vec![("A", None), ("B", Some("Did B")), ("C", Some("Did C"))]);
+        assert_eq!(
+            got,
+            vec![("A", None), ("B", Some("Did B")), ("C", Some("Did C"))]
+        );
     }
 
     #[test]
@@ -1294,13 +1414,19 @@ mod tests {
         st.apply_agents(&json!([idle]), &cfg);
         assert_eq!(st.cards["w1:p1"].status, "idle");
         // A brand-new agent pane appears via reconcile alone.
-        st.apply_agents(&json!([pane("w1:p1","w1",Some("claude")), pane("w1:p5","w1",Some("codex"))]), &cfg);
+        st.apply_agents(
+            &json!([
+                pane("w1:p1", "w1", Some("claude")),
+                pane("w1:p5", "w1", Some("codex"))
+            ]),
+            &cfg,
+        );
         assert!(st.cards.contains_key("w1:p5"));
         // Absence tolerated twice, dropped on the third consecutive miss.
-        let fx1 = st.apply_agents(&json!([pane("w1:p1","w1",Some("claude"))]), &cfg);
+        let fx1 = st.apply_agents(&json!([pane("w1:p1", "w1", Some("claude"))]), &cfg);
         assert!(st.cards.contains_key("w1:p5") && fx1.tailer.is_empty());
-        st.apply_agents(&json!([pane("w1:p1","w1",Some("claude"))]), &cfg);
-        let fx3 = st.apply_agents(&json!([pane("w1:p1","w1",Some("claude"))]), &cfg);
+        st.apply_agents(&json!([pane("w1:p1", "w1", Some("claude"))]), &cfg);
+        let fx3 = st.apply_agents(&json!([pane("w1:p1", "w1", Some("claude"))]), &cfg);
         assert!(!st.cards.contains_key("w1:p5"));
         assert!(matches!(fx3.tailer.as_slice(), [TailerCmd::Drop(p)] if p == "w1:p5"));
         // A single flicker resets the counter.
@@ -1329,13 +1455,21 @@ mod tests {
         let view = st.cards["w1:p1"].transcript.as_ref().unwrap();
         let (_, date) = view.last_text_at.as_ref().unwrap();
         assert!(date.starts_with("2026-08-0")); // tz shift can move the day
-        // No timestamp on the line → receipt time fills in.
+                                                // No timestamp on the line → receipt time fills in.
         st.apply_transcript(
             "w1:p1",
-            TranscriptUpdate { last_text: Some("more".into()), ..Default::default() },
+            TranscriptUpdate {
+                last_text: Some("more".into()),
+                ..Default::default()
+            },
             &cfg,
         );
-        assert!(st.cards["w1:p1"].transcript.as_ref().unwrap().last_text_at.is_some());
+        assert!(st.cards["w1:p1"]
+            .transcript
+            .as_ref()
+            .unwrap()
+            .last_text_at
+            .is_some());
     }
 
     #[test]
@@ -1350,7 +1484,11 @@ mod tests {
                 activities: vec![tool("Edit"), tool("Edit"), tool("Bash")],
                 last_text: Some("All done.\nShip it.".into()),
                 last_text_at: Some("2026-08-05T16:00:00.000Z".into()),
-                usage: Some(crate::transcript::TokenUsage { input: 5, cache_read: 100, output: 9 }),
+                usage: Some(crate::transcript::TokenUsage {
+                    input: 5,
+                    cache_read: 100,
+                    output: 9,
+                }),
                 ..Default::default()
             },
             &cfg,

@@ -39,7 +39,11 @@ impl Version {
             let p = parts.next()?;
             (!p.is_empty() && p.bytes().all(|b| b.is_ascii_digit())).then(|| p.parse().ok())?
         };
-        let v = Version { major: next()?, minor: next()?, patch: next()? };
+        let v = Version {
+            major: next()?,
+            minor: next()?,
+            patch: next()?,
+        };
         parts.next().is_none().then_some(v)
     }
 
@@ -85,10 +89,19 @@ fn cache_path() -> Option<PathBuf> {
 
 /// (last_check_unix, latest_seen) from the cache; zeros/None when unreadable.
 fn read_cache() -> (u64, Option<Version>) {
-    let Some(path) = cache_path() else { return (0, None) };
-    let Ok(text) = std::fs::read_to_string(path) else { return (0, None) };
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { return (0, None) };
-    let last = v.get("last_check_unix").and_then(|n| n.as_u64()).unwrap_or(0);
+    let Some(path) = cache_path() else {
+        return (0, None);
+    };
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return (0, None);
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return (0, None);
+    };
+    let last = v
+        .get("last_check_unix")
+        .and_then(|n| n.as_u64())
+        .unwrap_or(0);
     let latest = v
         .get("latest_seen")
         .and_then(|s| s.as_str())
@@ -119,7 +132,10 @@ fn probe(repo_url: &str) -> io::Result<String> {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let dir = std::env::temp_dir().join(format!("herdr-agent-state-probe-{}-{nanos}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!(
+        "herdr-agent-state-probe-{}-{nanos}",
+        std::process::id()
+    ));
     std::fs::create_dir(&dir)?; // exclusive: fails if the path already exists
     let result = probe_in(repo_url, &dir);
     let _ = std::fs::remove_dir_all(&dir);
@@ -197,7 +213,14 @@ mod tests {
 
     #[test]
     fn version_parse_and_order() {
-        assert_eq!(Version::parse("1.2.3"), Some(Version { major: 1, minor: 2, patch: 3 }));
+        assert_eq!(
+            Version::parse("1.2.3"),
+            Some(Version {
+                major: 1,
+                minor: 2,
+                patch: 3
+            })
+        );
         assert_eq!(Version::parse("v0.10.0").unwrap().to_string(), "0.10.0");
         assert!(Version::parse("1.2.3-rc1").is_none()); // pre-release ≠ stable
         assert!(Version::parse("1.2").is_none());
@@ -213,7 +236,10 @@ aaa\trefs/tags/v0.1.0\n\
 bbb\trefs/tags/v0.3.0^{}\n\
 ccc\trefs/tags/v0.2.0\n\
 ddd\trefs/tags/nightly\n";
-        assert_eq!(parse_tag_ref("aaa\trefs/tags/v0.1.0").unwrap().to_string(), "0.1.0");
+        assert_eq!(
+            parse_tag_ref("aaa\trefs/tags/v0.1.0").unwrap().to_string(),
+            "0.1.0"
+        );
         assert!(parse_tag_ref("bbb\trefs/tags/v0.3.0^{}").is_none());
         assert_eq!(latest_stable(out).unwrap().to_string(), "0.2.0");
         assert!(latest_stable("junk with no tabs\n").is_none());

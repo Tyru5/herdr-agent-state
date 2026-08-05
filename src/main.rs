@@ -7,10 +7,10 @@
 //!   1. The herdr socket (`$HERDR_SOCKET_PATH`): a `session.snapshot` seed,
 //!      then `events.subscribe` for pane/agent lifecycle — status
 //!      (idle/working/blocked/done), terminal title, session bindings.
-//!   2. Claude Code transcript JSONL files (resolved from each pane's
-//!      agent-session binding), tailed for tool-call activity, the last
-//!      assistant message, and token usage. Agents without a transcript get
-//!      the status-badge fallback card.
+//!   2. Claude Code and Codex transcript JSONL files (resolved from each
+//!      pane's agent-session binding), tailed for tool-call activity, the last
+//!      assistant message, and token usage. Agents without a supported
+//!      transcript get the status-badge fallback card.
 //!
 //! `--probe` skips the TUI and dumps the raw socket stream to stdout — the
 //! live-verification tool for protocol drift.
@@ -89,7 +89,10 @@ fn restore_terminal() {
 
 /// Write the full update log as Markdown. Returns the path written to, for
 /// the header flash.
-fn export_markdown(st: &model::AppState, cfg: &config::Config) -> std::io::Result<std::path::PathBuf> {
+fn export_markdown(
+    st: &model::AppState,
+    cfg: &config::Config,
+) -> std::io::Result<std::path::PathBuf> {
     // Default: the workspace's working directory (where the user's project
     // lives — the agent pane's cwd), so exports land next to the work.
     // `export_dir` overrides. Last resort: our own process cwd.
@@ -103,10 +106,19 @@ fn export_markdown(st: &model::AppState, cfg: &config::Config) -> std::io::Resul
             .unwrap_or_else(|| std::path::PathBuf::from("."))
     };
     std::fs::create_dir_all(&dir)?;
-    let ws = st.workspace_label.clone().unwrap_or_else(|| st.workspace_id.clone());
+    let ws = st
+        .workspace_label
+        .clone()
+        .unwrap_or_else(|| st.workspace_id.clone());
     let slug: String = ws
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
     let path = dir.join(format!(
         "agent-state-{slug}-{}.md",
@@ -122,7 +134,11 @@ fn debug_log(msg: &str) {
     if let Ok(path) = std::env::var("HERDR_STATE_DEBUG") {
         if !path.is_empty() {
             use std::io::Write;
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+            {
                 let _ = writeln!(f, "{msg}");
             }
         }
@@ -213,26 +229,29 @@ fn main() -> std::io::Result<()> {
                             }
                         }
                     };
-                    debug_log(&format!("key byte: {b:#04x} -> {}", match &msg {
-                        Some(KeyMsg::Quit) => "quit",
-                        Some(KeyMsg::SelNext) => "selnext",
-                        Some(KeyMsg::SelPrev) => "selprev",
-                        Some(KeyMsg::Toggle) => "toggle",
-                        Some(KeyMsg::Activate) => "activate",
-                        Some(KeyMsg::FocusAgent) => "focusagent",
-                        Some(KeyMsg::Full) => "full",
-                        Some(KeyMsg::Export) => "export",
-                        Some(KeyMsg::Help) => "help",
-                        Some(KeyMsg::Tab) => "tab",
-                        Some(KeyMsg::ScrollDown) => "scrolldown",
-                        Some(KeyMsg::ScrollUp) => "scrollup",
-                        Some(KeyMsg::PageDown) => "pagedown",
-                        Some(KeyMsg::PageUp) => "pageup",
-                        Some(KeyMsg::Top) => "top",
-                        Some(KeyMsg::Bottom) => "bottom",
-                        Some(KeyMsg::ExpandAll) => "expandall",
-                        None => "none",
-                    }));
+                    debug_log(&format!(
+                        "key byte: {b:#04x} -> {}",
+                        match &msg {
+                            Some(KeyMsg::Quit) => "quit",
+                            Some(KeyMsg::SelNext) => "selnext",
+                            Some(KeyMsg::SelPrev) => "selprev",
+                            Some(KeyMsg::Toggle) => "toggle",
+                            Some(KeyMsg::Activate) => "activate",
+                            Some(KeyMsg::FocusAgent) => "focusagent",
+                            Some(KeyMsg::Full) => "full",
+                            Some(KeyMsg::Export) => "export",
+                            Some(KeyMsg::Help) => "help",
+                            Some(KeyMsg::Tab) => "tab",
+                            Some(KeyMsg::ScrollDown) => "scrolldown",
+                            Some(KeyMsg::ScrollUp) => "scrollup",
+                            Some(KeyMsg::PageDown) => "pagedown",
+                            Some(KeyMsg::PageUp) => "pageup",
+                            Some(KeyMsg::Top) => "top",
+                            Some(KeyMsg::Bottom) => "bottom",
+                            Some(KeyMsg::ExpandAll) => "expandall",
+                            None => "none",
+                        }
+                    ));
                     if let Some(msg) = msg {
                         if tx.send(Ev::Key(msg)).is_err() {
                             return;
@@ -288,19 +307,27 @@ fn main() -> std::io::Result<()> {
                         "snapshot: ws={} self={:?} panes_in_snap={} cards={:?}",
                         st.workspace_id,
                         st.self_pane_id,
-                        snap.get("panes").and_then(|p| p.as_array()).map_or(0, |a| a.len()),
+                        snap.get("panes")
+                            .and_then(|p| p.as_array())
+                            .map_or(0, |a| a.len()),
                         st.cards.keys().collect::<Vec<_>>()
                     ));
                 }
                 Ev::Socket(SocketMsg::Agents(agents)) => {
                     effects = st.apply_agents(&agents, &cfg);
-                    debug_log(&format!("agents: cards={:?}", st.cards.keys().collect::<Vec<_>>()));
+                    debug_log(&format!(
+                        "agents: cards={:?}",
+                        st.cards.keys().collect::<Vec<_>>()
+                    ));
                 }
                 Ev::Socket(SocketMsg::Event(envelope)) => {
                     effects = st.apply_event(&envelope, &cfg);
                     debug_log(&format!(
                         "event: {} cards={}",
-                        envelope.get("event").and_then(|e| e.as_str()).unwrap_or("?"),
+                        envelope
+                            .get("event")
+                            .and_then(|e| e.as_str())
+                            .unwrap_or("?"),
                         st.cards.len()
                     ));
                 }
@@ -309,7 +336,10 @@ fn main() -> std::io::Result<()> {
                     if !work.is_empty() {
                         if let Some(reqs) = &sum_reqs {
                             st.mark_summarizing(work.iter().map(|w| w.id));
-                            let _ = reqs.send(summarize::SumReq { pane_id, items: work });
+                            let _ = reqs.send(summarize::SumReq {
+                                pane_id,
+                                items: work,
+                            });
                         }
                     }
                 }
@@ -368,17 +398,20 @@ fn main() -> std::io::Result<()> {
                 Ev::Key(KeyMsg::SelPrev) => st.select_step(false),
                 Ev::Key(KeyMsg::Toggle) => st.fold_selected(),
                 Ev::Key(KeyMsg::Activate) => match st.activate_selected() {
-                    model::Activate::OpenRow { path, offset, tool_use_id, agent_pane } => {
-                        match transcript::read_entry(&path, offset, tool_use_id.as_deref()) {
-                            Some(entry) => st.open_detail(entry, agent_pane),
-                            None => {
-                                st.flash = Some((
-                                    "entry no longer readable from transcript".into(),
-                                    Instant::now(),
-                                ));
-                            }
+                    model::Activate::OpenRow {
+                        path,
+                        offset,
+                        tool_use_id,
+                        agent_pane,
+                    } => match transcript::read_entry(&path, offset, tool_use_id.as_deref()) {
+                        Some(entry) => st.open_detail(entry, agent_pane),
+                        None => {
+                            st.flash = Some((
+                                "entry no longer readable from transcript".into(),
+                                Instant::now(),
+                            ));
                         }
-                    }
+                    },
                     model::Activate::Toggled | model::Activate::None => {}
                 },
                 Ev::Key(KeyMsg::FocusAgent) => {
