@@ -64,6 +64,8 @@ pub enum KeyMsg {
     FocusAgent,
     /// f: toggle full (untruncated) content in the detail view.
     Full,
+    /// v: switch between the text log and compact activity map.
+    Visual,
     /// x: export the whole update log to a Markdown file.
     Export,
     /// ?: toggle the help/settings panel.
@@ -158,6 +160,9 @@ fn main() -> std::io::Result<()> {
     let sum_reqs = summarize::spawn(tx.clone(), cfg.clone());
     update::spawn(tx.clone());
     let mut st = model::AppState::new();
+    if cfg.visual_mode {
+        st.toggle_visual();
+    }
 
     // stdin → key commands. Bytes, not crossterm events: q / Ctrl-C quit,
     // j/k and arrow up/down scroll, everything else ignored.
@@ -186,6 +191,7 @@ fn main() -> std::io::Result<()> {
                             b'e' => Some(KeyMsg::ExpandAll),
                             b'o' => Some(KeyMsg::FocusAgent),
                             b'f' => Some(KeyMsg::Full),
+                            b'v' => Some(KeyMsg::Visual),
                             b'x' => Some(KeyMsg::Export),
                             b'?' => Some(KeyMsg::Help),
                             0x09 => Some(KeyMsg::Tab),
@@ -239,6 +245,7 @@ fn main() -> std::io::Result<()> {
                             Some(KeyMsg::Activate) => "activate",
                             Some(KeyMsg::FocusAgent) => "focusagent",
                             Some(KeyMsg::Full) => "full",
+                            Some(KeyMsg::Visual) => "visual",
                             Some(KeyMsg::Export) => "export",
                             Some(KeyMsg::Help) => "help",
                             Some(KeyMsg::Tab) => "tab",
@@ -391,8 +398,16 @@ fn main() -> std::io::Result<()> {
                         st.flash = Some((msg, Instant::now()));
                     }
                     KeyMsg::Help => st.help = Some(model::HelpPanel::default()),
-                    KeyMsg::Tab => {}
+                    KeyMsg::Tab | KeyMsg::Visual => {}
                 },
+                Ev::Key(KeyMsg::Visual) => st.toggle_visual(),
+                Ev::Key(KeyMsg::SelNext) if st.visual => st.scroll_lines(1),
+                Ev::Key(KeyMsg::SelPrev) if st.visual => st.scroll_lines(-1),
+                Ev::Key(KeyMsg::Toggle | KeyMsg::Activate | KeyMsg::ExpandAll | KeyMsg::Full)
+                    if st.visual =>
+                {
+                    st.flash = Some(("text view only — press v".into(), Instant::now()));
+                }
                 Ev::Key(KeyMsg::Quit) => break 'outer,
                 Ev::Key(KeyMsg::SelNext) => st.select_step(true),
                 Ev::Key(KeyMsg::SelPrev) => st.select_step(false),

@@ -218,7 +218,11 @@ pub struct AppState {
     pub self_pane_id: Option<String>,
     pub cards: BTreeMap<String, AgentCard>,
     pub conn: Conn,
+    /// Active view, independent of the configured startup preference.
+    pub visual: bool,
     pub scroll: ScrollPos,
+    /// Independent scroll position for the inactive text/map view.
+    pub alternate_scroll: ScrollPos,
     /// (total content lines, viewport height) as of the last draw — the
     /// basis scroll movements are clamped against.
     pub viewport: (usize, usize),
@@ -270,7 +274,9 @@ impl AppState {
                 .filter(|s| !s.is_empty()),
             cards: BTreeMap::new(),
             conn: Conn::Reconnecting("connecting…".into()),
+            visual: false,
             scroll: ScrollPos::Follow,
+            alternate_scroll: ScrollPos::At(0),
             viewport: (0, 0),
             selected: None,
             detail: None,
@@ -286,15 +292,18 @@ impl AppState {
         }
     }
 
+    pub fn toggle_visual(&mut self) {
+        self.visual = !self.visual;
+        std::mem::swap(&mut self.scroll, &mut self.alternate_scroll);
+        self.flash = None;
+    }
+
     /// A scroll key that has nowhere to go must SAY so — silence reads as
     /// "the key is broken".
     fn scroll_noop_feedback(&mut self) -> bool {
         let (total, view_h) = self.viewport;
         if total <= view_h {
-            self.flash = Some((
-                "all updates fit on screen — press e to expand groups".into(),
-                Instant::now(),
-            ));
+            self.flash = Some(("all content fits on screen".into(), Instant::now()));
             return true;
         }
         false
@@ -981,7 +990,9 @@ mod tests {
             self_pane_id: Some("w1:p9".into()),
             cards: BTreeMap::new(),
             conn: Conn::Connected,
+            visual: false,
             scroll: ScrollPos::Follow,
+            alternate_scroll: ScrollPos::At(0),
             viewport: (0, 0),
             selected: None,
             detail: None,
@@ -1005,6 +1016,23 @@ mod tests {
             offset: 0,
             tool_use_id: None,
         }
+    }
+
+    #[test]
+    fn visual_toggle_preserves_each_scroll_and_text_selection() {
+        let mut st = state("w1");
+        st.scroll = ScrollPos::At(37);
+        st.selected = Some(SelTarget::Group(9));
+        st.toggle_visual();
+        assert!(st.visual);
+        assert_eq!(st.scroll, ScrollPos::At(0));
+        st.scroll = ScrollPos::At(5);
+        st.toggle_visual();
+        assert!(!st.visual);
+        assert_eq!(st.scroll, ScrollPos::At(37));
+        assert_eq!(st.selected, Some(SelTarget::Group(9)));
+        st.toggle_visual();
+        assert_eq!(st.scroll, ScrollPos::At(5));
     }
 
     fn pane(id: &str, ws: &str, agent: Option<&str>) -> Value {
