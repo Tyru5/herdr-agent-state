@@ -401,12 +401,11 @@ fn main() -> std::io::Result<()> {
                     KeyMsg::Tab | KeyMsg::Visual => {}
                 },
                 Ev::Key(KeyMsg::Visual) => st.toggle_visual(),
-                Ev::Key(KeyMsg::SelNext) if st.visual => st.scroll_lines(1),
-                Ev::Key(KeyMsg::SelPrev) if st.visual => st.scroll_lines(-1),
-                Ev::Key(KeyMsg::Toggle | KeyMsg::Activate | KeyMsg::ExpandAll | KeyMsg::Full)
-                    if st.visual =>
-                {
-                    st.flash = Some(("text view only — press v".into(), Instant::now()));
+                Ev::Key(KeyMsg::Full) if st.visual => {
+                    st.flash = Some((
+                        "select an action · enter for full detail".into(),
+                        Instant::now(),
+                    ));
                 }
                 Ev::Key(KeyMsg::Quit) => break 'outer,
                 Ev::Key(KeyMsg::SelNext) => st.select_step(true),
@@ -451,7 +450,7 @@ fn main() -> std::io::Result<()> {
                     st.flash = Some((msg, Instant::now()));
                 }
                 Ev::UpdateCheck(newer) => st.update_available = newer,
-                Ev::Winch => {} // redraw happens at loop top
+                Ev::Winch => st.reveal_selection = st.visual,
                 Ev::Tick => {
                     // The tick is also the "since" clock; check (debounced)
                     // whether a fresh snapshot is worth fetching — a card

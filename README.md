@@ -100,13 +100,20 @@ herdr plugin link /path/to/herdr-agent-state
   connected top-to-bottom (oldest to newest). Wider panes place agents side by
   side; narrow splits stack them. Connections show observed tool order, not
   agent dependencies or completion percentages. Missing transcripts show a
-  status-only card. `j`/`k`, `J`/`K`, `PgUp`/`PgDn`, and `g`/`G` scroll the
-  map; switch back to text for folding and entry details. Each view keeps its
-  own scroll position, and the full history remains available for export.
+  status-only card. **Drill down in the map:** `j`/`k` or arrows select a node;
+  `enter`/`space` expands it into a numbered list of every retained action,
+  including single-action nodes. Select an action and press `enter` to read
+  its full input and paired result (`f` shows untrimmed content). `q` returns
+  to the expanded node and restores your map position. Action previews use
+  summaries when available, otherwise the raw tool description.
+  `h`/`l` folds the selected node (also from a child action); `e` expands or
+  collapses all visible nodes. Selected and expanded nodes stay on the map
+  when newer activity arrives. `J`/`K`, `PgUp`/`PgDn`, and `g`/`G` scroll
+  without moving the cursor; cursor navigation brings the selection on screen.
+  Each view keeps its own selection, folds, and scroll position, and the full
+  retained history remains available in text mode and for export.
   The map starts at the top; when it overflows, a footer shows the visible
   line range, arrows for more content above/below, and a scroll hint.
-  Text-only keys (`enter`/`space`, `h`/`l`, `e`, `f`) show a reminder to press
-  `v` instead of silently doing nothing in the map.
   The map is static (no animation). Text is the default; set `visual_mode=true`
   in `state.conf` or `HERDR_STATE_VISUAL_MODE=true` to start in map mode.
   The `v` toggle lasts for the current invocation and does not rewrite config.
