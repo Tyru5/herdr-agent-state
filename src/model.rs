@@ -108,6 +108,7 @@ pub struct Detail {
     pub agent_pane: String,
     /// false: sections truncated to a screenful; true: everything, wrapped.
     pub full: bool,
+    return_scroll: ScrollPos,
 }
 
 /// A run of consecutive same-tool steps, rendered as one foldable row
@@ -118,6 +119,17 @@ pub struct ActivityGroup {
     pub name: String,
     pub rows: Vec<ActivityRow>,
     pub expanded: bool,
+    pub visual_expanded: bool,
+}
+
+impl ActivityGroup {
+    fn contains(&self, selected: Option<SelTarget>) -> bool {
+        match selected {
+            Some(SelTarget::Group(id)) => self.id == id,
+            Some(SelTarget::Row(id)) => self.rows.iter().any(|r| r.id == id),
+            None => false,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -144,6 +156,17 @@ pub fn fmt_stamp(iso: &str) -> Option<(String, String)> {
 impl TranscriptView {
     pub fn row_count(&self) -> usize {
         self.groups.iter().map(|g| g.rows.len()).sum()
+    }
+
+    /// Keep inspected nodes when live activity pushes them out of the recent three.
+    pub fn visual_groups(
+        &self,
+        selected: Option<SelTarget>,
+    ) -> impl Iterator<Item = &ActivityGroup> {
+        let recent = self.groups.len().saturating_sub(3);
+        self.groups.iter().enumerate().filter_map(move |(i, g)| {
+            (i >= recent || g.visual_expanded || g.contains(selected)).then_some(g)
+        })
     }
 }
 
@@ -218,12 +241,19 @@ pub struct AppState {
     pub self_pane_id: Option<String>,
     pub cards: BTreeMap<String, AgentCard>,
     pub conn: Conn,
+    /// Active view, independent of the configured startup preference.
+    pub visual: bool,
     pub scroll: ScrollPos,
+    /// Independent scroll position for the inactive text/map view.
+    pub alternate_scroll: ScrollPos,
     /// (total content lines, viewport height) as of the last draw — the
     /// basis scroll movements are clamped against.
     pub viewport: (usize, usize),
     /// Fold cursor: the selected group header or row, if any.
     pub selected: Option<SelTarget>,
+    pub visual_selected: Option<SelTarget>,
+    /// Bring the map cursor on screen after navigation, folding, or resize.
+    pub reveal_selection: bool,
     /// Open entry detail view, replacing the card stack until dismissed.
     pub detail: Option<Detail>,
     /// Help/settings panel (tabbed modal overlay), when open.
@@ -270,9 +300,13 @@ impl AppState {
                 .filter(|s| !s.is_empty()),
             cards: BTreeMap::new(),
             conn: Conn::Reconnecting("connecting…".into()),
+            visual: false,
             scroll: ScrollPos::Follow,
+            alternate_scroll: ScrollPos::At(0),
             viewport: (0, 0),
             selected: None,
+            visual_selected: None,
+            reveal_selection: false,
             detail: None,
             help: None,
             update_available: None,
@@ -286,15 +320,18 @@ impl AppState {
         }
     }
 
+    pub fn toggle_visual(&mut self) {
+        self.visual = !self.visual;
+        std::mem::swap(&mut self.scroll, &mut self.alternate_scroll);
+        self.flash = None;
+    }
+
     /// A scroll key that has nowhere to go must SAY so — silence reads as
     /// "the key is broken".
     fn scroll_noop_feedback(&mut self) -> bool {
         let (total, view_h) = self.viewport;
         if total <= view_h {
-            self.flash = Some((
-                "all updates fit on screen — press e to expand groups".into(),
-                Instant::now(),
-            ));
+            self.flash = Some(("all content fits on screen".into(), Instant::now()));
             return true;
         }
         false
@@ -368,6 +405,35 @@ impl AppState {
     /// Expand every foldable group if any is collapsed; collapse all
     /// otherwise. The one-key way to open the full history for scrolling.
     pub fn expand_all(&mut self) {
+        if self.visual {
+            let visible: std::collections::HashSet<_> = self
+                .cards
+                .values()
+                .filter_map(|c| c.transcript.as_ref())
+                .flat_map(|v| v.visual_groups(self.visual_selected))
+                .map(|g| g.id)
+                .collect();
+            let any_collapsed = self
+                .cards
+                .values()
+                .filter_map(|c| c.transcript.as_ref())
+                .flat_map(|v| v.groups.iter())
+                .any(|g| visible.contains(&g.id) && !g.visual_expanded);
+            for g in self
+                .cards
+                .values_mut()
+                .filter_map(|c| c.transcript.as_mut())
+                .flat_map(|v| v.groups.iter_mut())
+                .filter(|g| visible.contains(&g.id))
+            {
+                g.visual_expanded = any_collapsed;
+                if !any_collapsed && g.contains(self.visual_selected) {
+                    self.visual_selected = Some(SelTarget::Group(g.id));
+                }
+            }
+            self.reveal_selection = true;
+            return;
+        }
         let any_collapsed = self
             .cards
             .values()
@@ -645,6 +711,7 @@ impl AppState {
                     name: act.name,
                     rows: vec![row],
                     expanded: false,
+                    visual_expanded: false,
                 }),
             }
             // Full session history is kept — the viewport, not the data, is
@@ -718,6 +785,15 @@ impl AppState {
     fn selectable(&self) -> Vec<SelTarget> {
         let mut out = Vec::new();
         for view in self.cards.values().filter_map(|c| c.transcript.as_ref()) {
+            if self.visual {
+                for g in view.visual_groups(self.visual_selected) {
+                    out.push(SelTarget::Group(g.id));
+                    if g.visual_expanded {
+                        out.extend(g.rows.iter().map(|r| SelTarget::Row(r.id)));
+                    }
+                }
+                continue;
+            }
             for g in &view.groups {
                 if g.rows.len() == 1 {
                     out.push(SelTarget::Row(g.rows[0].id));
@@ -732,27 +808,52 @@ impl AppState {
         out
     }
 
+    fn selection(&self) -> Option<SelTarget> {
+        if self.visual {
+            self.visual_selected
+        } else {
+            self.selected
+        }
+    }
+
+    fn select(&mut self, target: Option<SelTarget>) {
+        if self.visual {
+            self.visual_selected = target;
+            self.reveal_selection = true;
+        } else {
+            self.selected = target;
+        }
+    }
+
+    /// Called before drawing: resets, pruning, and removed panes can invalidate IDs.
+    pub fn reconcile_visual_selection(&mut self) {
+        let targets = self.selectable();
+        if !self.visual_selected.is_some_and(|s| targets.contains(&s)) {
+            self.select(targets.first().copied());
+        }
+    }
+
     /// Move the fold cursor forward/backward through selectable targets.
     pub fn select_step(&mut self, forward: bool) {
         let targets = self.selectable();
         if targets.is_empty() {
-            self.selected = None;
+            self.select(None);
             return;
         }
         let pos = self
-            .selected
+            .selection()
             .and_then(|s| targets.iter().position(|&t| t == s));
-        self.selected = Some(match (pos, forward) {
+        self.select(Some(match (pos, forward) {
             (None, true) => targets[0],
             (None, false) => *targets.last().unwrap(),
             (Some(p), true) => targets[(p + 1).min(targets.len() - 1)],
             (Some(p), false) => targets[p.saturating_sub(1)],
-        });
+        }));
     }
 
     /// Enter on the selection: toggle a group, or ask for a row's detail.
     pub fn activate_selected(&mut self) -> Activate {
-        match self.selected {
+        match self.selection() {
             None => Activate::None,
             Some(SelTarget::Group(_)) => {
                 self.fold_selected();
@@ -832,7 +933,7 @@ impl AppState {
     /// Expand/collapse the selected group — or, for a selected row, its
     /// parent group.
     pub fn fold_selected(&mut self) {
-        let Some(sel) = self.selected else { return };
+        let Some(sel) = self.selection() else { return };
         if let Some(g) = self
             .cards
             .values_mut()
@@ -840,16 +941,24 @@ impl AppState {
             .flat_map(|v| v.groups.iter_mut())
             .find(|g| match sel {
                 SelTarget::Group(id) => g.id == id,
-                SelTarget::Row(id) => g.rows.len() >= 2 && g.rows.iter().any(|r| r.id == id),
+                SelTarget::Row(id) => {
+                    (self.visual || g.rows.len() >= 2) && g.rows.iter().any(|r| r.id == id)
+                }
             })
         {
-            g.expanded = !g.expanded;
+            let expanded = if self.visual {
+                &mut g.visual_expanded
+            } else {
+                &mut g.expanded
+            };
+            *expanded = !*expanded;
             // Collapsing under a row cursor: move the cursor to the header.
-            if !g.expanded {
-                if let SelTarget::Row(_) = sel {
-                    self.selected = Some(SelTarget::Group(g.id));
-                }
-            }
+            let target = if !*expanded {
+                SelTarget::Group(g.id)
+            } else {
+                sel
+            };
+            self.select(Some(target));
         }
     }
 
@@ -859,13 +968,20 @@ impl AppState {
             entry,
             agent_pane,
             full: false,
+            return_scroll: self.scroll,
         });
         self.scroll = ScrollPos::At(0);
     }
 
     pub fn close_detail(&mut self) {
-        self.detail = None;
-        self.scroll = ScrollPos::Follow;
+        if let Some(detail) = self.detail.take() {
+            self.scroll = if self.visual {
+                detail.return_scroll
+            } else {
+                ScrollPos::Follow
+            };
+            self.reveal_selection = self.visual;
+        }
     }
 
     /// Called on each tick: should we ask for a fresh snapshot — to pick up a
@@ -981,9 +1097,13 @@ mod tests {
             self_pane_id: Some("w1:p9".into()),
             cards: BTreeMap::new(),
             conn: Conn::Connected,
+            visual: false,
             scroll: ScrollPos::Follow,
+            alternate_scroll: ScrollPos::At(0),
             viewport: (0, 0),
             selected: None,
+            visual_selected: None,
+            reveal_selection: false,
             detail: None,
             help: None,
             update_available: None,
@@ -1005,6 +1125,210 @@ mod tests {
             offset: 0,
             tool_use_id: None,
         }
+    }
+
+    #[test]
+    fn visual_toggle_preserves_each_scroll_and_text_selection() {
+        let mut st = state("w1");
+        st.scroll = ScrollPos::At(37);
+        st.selected = Some(SelTarget::Group(9));
+        st.toggle_visual();
+        assert!(st.visual);
+        assert_eq!(st.scroll, ScrollPos::At(0));
+        st.scroll = ScrollPos::At(5);
+        st.toggle_visual();
+        assert!(!st.visual);
+        assert_eq!(st.scroll, ScrollPos::At(37));
+        assert_eq!(st.selected, Some(SelTarget::Group(9)));
+        st.toggle_visual();
+        assert_eq!(st.scroll, ScrollPos::At(5));
+    }
+
+    fn visual_state() -> AppState {
+        let mut st = state("w1");
+        let cfg = Config::default();
+        st.ingest_snapshot(
+            &json!({"panes": [
+                pane("w1:p1", "w1", Some("claude")),
+                pane("w1:p2", "w1", Some("codex")),
+            ]}),
+            &cfg,
+        );
+        for (pane, tools) in [
+            ("w1:p1", vec!["Old", "Read", "Edit", "Edit", "Bash"]),
+            ("w1:p2", vec!["Write"]),
+        ] {
+            st.apply_transcript(
+                pane,
+                TranscriptUpdate {
+                    activities: tools.into_iter().map(tool).collect(),
+                    ..Default::default()
+                },
+                &cfg,
+            );
+        }
+        st.toggle_visual();
+        st.reconcile_visual_selection();
+        st
+    }
+
+    #[test]
+    fn map_drills_into_singletons_and_each_group_action_independently_of_text() {
+        let mut st = visual_state();
+        assert_eq!(
+            st.selectable(),
+            vec![
+                SelTarget::Group(1),
+                SelTarget::Group(2),
+                SelTarget::Group(4),
+                SelTarget::Group(5)
+            ]
+        );
+        assert!(matches!(st.activate_selected(), Activate::Toggled));
+        st.select_step(true);
+        assert_eq!(st.visual_selected, Some(SelTarget::Row(1)));
+        st.fold_selected(); // Single-action nodes also collapse from their child.
+        assert_eq!(st.visual_selected, Some(SelTarget::Group(1)));
+        st.select_step(true);
+        st.activate_selected();
+        st.select_step(true);
+        assert_eq!(st.visual_selected, Some(SelTarget::Row(2)));
+        st.select_step(true);
+        assert_eq!(st.visual_selected, Some(SelTarget::Row(3)));
+        let card = st.cards.get_mut("w1:p1").unwrap();
+        card.transcript_path = Some("first.jsonl".into());
+        let row = &mut card.transcript.as_mut().unwrap().groups[2].rows[1];
+        row.offset = 303;
+        row.tool_use_id = Some("edit-second".into());
+        match st.activate_selected() {
+            Activate::OpenRow {
+                path,
+                offset,
+                tool_use_id,
+                agent_pane,
+            } => {
+                assert_eq!(path, std::path::PathBuf::from("first.jsonl"));
+                assert_eq!(offset, 303);
+                assert_eq!(tool_use_id.as_deref(), Some("edit-second"));
+                assert_eq!(agent_pane, "w1:p1");
+            }
+            _ => panic!("second action should open its own transcript entry"),
+        }
+        st.toggle_visual();
+        assert_eq!(st.selected, None);
+        assert!(!st.cards["w1:p1"].transcript.as_ref().unwrap().groups[2].expanded);
+        st.selected = Some(SelTarget::Group(2));
+        st.fold_selected();
+        st.toggle_visual();
+        assert_eq!(st.visual_selected, Some(SelTarget::Row(3)));
+        st.fold_selected();
+        let g = &st.cards["w1:p1"].transcript.as_ref().unwrap().groups[2];
+        assert!(g.expanded && !g.visual_expanded);
+        st.select_step(true); // Bash in first card, then Write in second.
+        st.select_step(true);
+        assert_eq!(st.visual_selected, Some(SelTarget::Group(5)));
+        st.select_step(true);
+        assert_eq!(st.visual_selected, Some(SelTarget::Group(5)));
+    }
+
+    #[test]
+    fn map_pins_inspected_nodes_and_recovers_after_reset_or_pane_removal() {
+        let mut st = visual_state();
+        st.select_step(true); // Edit
+        st.activate_selected();
+        st.select_step(true);
+        st.select_step(true); // second Edit action
+        st.apply_transcript(
+            "w1:p1",
+            TranscriptUpdate {
+                activities: vec![tool("Grep"), tool("Write"), tool("Bash")],
+                ..Default::default()
+            },
+            &Config::default(),
+        );
+        st.reconcile_visual_selection();
+        assert_eq!(st.visual_selected, Some(SelTarget::Row(3)));
+        let visible = |st: &AppState| {
+            st.cards["w1:p1"]
+                .transcript
+                .as_ref()
+                .unwrap()
+                .visual_groups(st.visual_selected)
+                .map(|g| g.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(visible(&st), vec![2, 6, 7, 8]);
+        st.fold_selected();
+        assert_eq!(visible(&st), vec![2, 6, 7, 8]); // selected header stays pinned
+        st.select_step(true);
+        assert_eq!(visible(&st), vec![6, 7, 8]);
+        st.apply_transcript(
+            "w1:p1",
+            TranscriptUpdate {
+                reset: true,
+                activities: vec![tool("Fresh")],
+                ..Default::default()
+            },
+            &Config::default(),
+        );
+        st.reconcile_visual_selection();
+        assert_eq!(st.visual_selected, Some(SelTarget::Group(9)));
+        st.cards.remove("w1:p1");
+        st.reconcile_visual_selection();
+        assert_eq!(st.visual_selected, Some(SelTarget::Group(5)));
+        st.cards.clear();
+        st.reconcile_visual_selection();
+        assert_eq!(st.visual_selected, None);
+    }
+
+    #[test]
+    fn map_expand_all_only_affects_visible_nodes_and_reparents_the_cursor() {
+        let mut st = visual_state();
+        st.expand_all();
+        let view = st.cards["w1:p1"].transcript.as_ref().unwrap();
+        assert!(!view.groups[0].visual_expanded); // hidden Old node
+        assert!(view
+            .groups
+            .iter()
+            .skip(1)
+            .all(|g| g.visual_expanded && !g.expanded));
+        st.select_step(true);
+        assert_eq!(st.visual_selected, Some(SelTarget::Row(1)));
+        st.expand_all();
+        assert_eq!(st.visual_selected, Some(SelTarget::Group(1)));
+        assert!(st
+            .cards
+            .values()
+            .filter_map(|c| c.transcript.as_ref())
+            .flat_map(|v| &v.groups)
+            .all(|g| !g.visual_expanded));
+    }
+
+    #[test]
+    fn map_detail_returns_to_the_same_scroll_cursor_and_expansion() {
+        let mut st = visual_state();
+        st.activate_selected();
+        st.select_step(true);
+        st.scroll = ScrollPos::At(12);
+        st.open_detail(
+            crate::transcript::EntryDetail {
+                name: "Read".into(),
+                time: None,
+                date: None,
+                text: None,
+                input: "file_path: src/main.rs".into(),
+                result: Some("file contents".into()),
+                result_error: false,
+            },
+            "w1:p1".into(),
+        );
+        assert_eq!(st.scroll, ScrollPos::At(0));
+        st.scroll = ScrollPos::At(80);
+        st.close_detail();
+        assert_eq!(st.scroll, ScrollPos::At(12));
+        assert_eq!(st.visual_selected, Some(SelTarget::Row(1)));
+        assert!(st.cards["w1:p1"].transcript.as_ref().unwrap().groups[1].visual_expanded);
+        assert!(st.detail.is_none() && st.visual && st.reveal_selection);
     }
 
     fn pane(id: &str, ws: &str, agent: Option<&str>) -> Value {

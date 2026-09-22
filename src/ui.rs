@@ -464,10 +464,163 @@ pub fn window_start(total: usize, view_h: usize, scroll: crate::model::ScrollPos
     }
 }
 
+/// Recent observed tool groups, plus nodes the user is still inspecting.
+fn visual_lines(
+    card: &AgentCard,
+    width: usize,
+    selected: Option<SelTarget>,
+    cfg: &Config,
+) -> Vec<Line<'static>> {
+    let status = Style::default().fg(status_color(&card.status));
+    let dim = Style::default().fg(Color::DarkGray);
+    let tool = Style::default().fg(Color::Cyan);
+    let glyph = match card.status.as_str() {
+        "working" => "●",
+        "blocked" => "!",
+        "done" => "✓",
+        "idle" => "○",
+        _ => "?",
+    };
+    let mut lines = vec![Line::from(Span::styled(
+        format!(
+            " {glyph} {} · {}",
+            card.status,
+            fmt_duration(card.status_since.elapsed().as_secs())
+        ),
+        status.add_modifier(Modifier::BOLD),
+    ))];
+    if let Some(title) = &card.title {
+        lines.extend(wrap(title, width, 2).into_iter().map(Line::from));
+    }
+    if card.status == "working"
+        && card.last_activity.elapsed().as_millis() >= cfg.thinking_after_ms as u128
+    {
+        lines.push(Line::from(Span::styled(" thinking…", dim)));
+    }
+    let Some(view) = &card.transcript else {
+        lines.push(Line::from(Span::styled(
+            " └─ status only · no transcript",
+            dim,
+        )));
+        return lines;
+    };
+    if view.stale {
+        lines.push(Line::from(Span::styled(
+            " transcript unavailable · retained activity",
+            dim,
+        )));
+    }
+    let groups: Vec<_> = view.visual_groups(selected).collect();
+    if groups.is_empty() {
+        lines.push(Line::from(Span::styled(" └─ no tool activity yet", dim)));
+        return lines;
+    }
+    lines.push(Line::from(Span::styled(
+        format!(" recent tools ↓ · {} calls", view.row_count()),
+        dim,
+    )));
+    for (i, g) in groups.iter().enumerate() {
+        let marker = if g.visual_expanded { "▾" } else { "▸" };
+        let label = if g.rows.len() > 1 {
+            format!("{marker} {} ×{}", g.name, g.rows.len())
+        } else {
+            format!("{marker} {}", g.name)
+        };
+        let header_style = if selected == Some(SelTarget::Group(g.id)) {
+            tool.add_modifier(Modifier::REVERSED)
+        } else {
+            tool
+        };
+        let cell = if g.visual_expanded {
+            width
+        } else {
+            width.min(24)
+        };
+        // Box content clips by terminal cells, including wide Unicode names.
+        let boxed = |text: &str, style: Style| {
+            let mut text = text.to_string();
+            let available = cell.saturating_sub(4);
+            if Line::from(text.as_str()).width() > available {
+                while Line::from(text.as_str()).width() + 1 > available && !text.is_empty() {
+                    text.pop();
+                }
+                text.push('…');
+            }
+            let padding = " ".repeat(available.saturating_sub(Line::from(text.as_str()).width()));
+            Line::from(vec![
+                Span::styled("│ ", tool),
+                Span::styled(format!("{text}{padding}"), style),
+                Span::styled(" │", tool),
+            ])
+            .centered()
+        };
+        // At very small widths degrade to a trail; never flip sideways.
+        if width < 18 {
+            let branch = if i + 1 == groups.len() {
+                " └─ "
+            } else {
+                " ├─ "
+            };
+            lines.push(Line::from(vec![
+                Span::styled(branch, dim),
+                Span::styled(label, header_style),
+            ]));
+        } else {
+            let edge = "─".repeat(cell - 2);
+            lines.push(Line::from(Span::styled("│", dim)).centered());
+            lines.push(Line::from(Span::styled(format!("┌{edge}┐"), tool)).centered());
+            lines.push(boxed(&label, header_style));
+        }
+        if g.visual_expanded {
+            for (index, row) in g.rows.iter().enumerate() {
+                let style = if selected == Some(SelTarget::Row(row.id)) {
+                    Style::default().add_modifier(Modifier::REVERSED)
+                } else {
+                    Style::default()
+                };
+                let text = row.summary.as_deref().unwrap_or(&row.detail);
+                // Every action is present; Enter opens unabridged input/result.
+                let preview = format!(
+                    "{}. {}",
+                    index + 1,
+                    if text.is_empty() { &row.name } else { text }
+                );
+                for line in wrap(&preview, width.saturating_sub(4).max(1), 3) {
+                    lines.push(if width < 18 {
+                        Line::from(Span::styled(format!("    {line}"), style))
+                    } else {
+                        boxed(&line, style)
+                    });
+                }
+            }
+        }
+        if width >= 18 {
+            let edge = "─".repeat(cell - 2);
+            lines.push(Line::from(Span::styled(format!("└{edge}┘"), tool)).centered());
+        }
+    }
+    if let Some(row) = groups
+        .last()
+        .filter(|g| !g.visual_expanded)
+        .and_then(|g| g.rows.last())
+    {
+        let text = row.summary.as_deref().unwrap_or(&row.detail);
+        lines.push(Line::from(Span::styled(
+            clip_line(&format!(" ↳ {text}"), width),
+            dim,
+        )));
+    }
+    lines
+}
+
 pub fn draw(f: &mut Frame, cfg: &Config, st: &mut AppState) {
     let area = f.area();
     if area.height == 0 || area.width == 0 {
         return;
+    }
+
+    if st.visual && st.detail.is_none() {
+        st.reconcile_visual_selection();
     }
 
     // Header: prefer the human workspace label over the raw id.
@@ -486,34 +639,43 @@ pub fn draw(f: &mut Frame, cfg: &Config, st: &mut AppState) {
         ),
         Span::styled(format!(" · {ws}  "), Style::default().fg(Color::DarkGray)),
     ];
-    if let Conn::Reconnecting(_) = &st.conn {
-        header.push(Span::styled(
-            "reconnecting… ",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        ));
-    }
-    if st.scroll != crate::model::ScrollPos::Follow {
+    if !st.visual && st.scroll != crate::model::ScrollPos::Follow {
         header.push(Span::styled(
             "⇡ history (G latest) ",
             Style::default().fg(Color::Yellow),
         ));
     }
-    // Transient feedback (e.g. why a scroll key had no effect).
-    if let Some((msg, at)) = &st.flash {
-        if at.elapsed() < std::time::Duration::from_secs(3) {
-            header.push(Span::styled(
-                format!("· {msg} "),
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::ITALIC),
-            ));
-        }
-    }
-    // Keys only reach this app while the pane is focused — advertise that
-    // loudly instead of listing shortcuts that would go to another pane.
-    let (hint, hint_style) = if st.self_focused {
+    let flash = st
+        .flash
+        .as_ref()
+        .filter(|(_, at)| at.elapsed() < std::time::Duration::from_secs(3));
+    // Connection state takes priority over key hints: retained cards must
+    // never look live just because the pane is too narrow for the header.
+    let (hint, hint_style) = if matches!(st.conn, Conn::Reconnecting(_)) {
         (
-            "? keys · q quit".to_string(),
+            "reconnecting…".to_string(),
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        )
+    } else if let Some((msg, _)) = flash {
+        (msg.clone(), Style::default().fg(Color::Yellow))
+    } else if st.self_focused {
+        (
+            if st.detail.is_some() {
+                "? keys · q quit"
+            } else if st.visual {
+                match (
+                    matches!(st.visual_selected, Some(SelTarget::Row(_))),
+                    area.width < 60,
+                ) {
+                    (true, true) => "v text · ↵ detail · ?",
+                    (false, true) => "v text · ↵ expand · ?",
+                    (true, false) => "v text · enter detail · ? keys",
+                    (false, false) => "v text · enter expand · ? keys",
+                }
+            } else {
+                "v map · ? keys · q quit"
+            }
+            .to_string(),
             Style::default().fg(Color::DarkGray),
         )
     } else {
@@ -522,15 +684,13 @@ pub fn draw(f: &mut Frame, cfg: &Config, st: &mut AppState) {
             Style::default().fg(Color::Yellow),
         )
     };
-    let head_area = Rect::new(area.x, area.y, area.width, 1);
+    let hint_w = Line::from(hint.as_str()).width().min(area.width as usize) as u16;
+    let head_area = Rect::new(area.x, area.y, area.width.saturating_sub(hint_w + 1), 1);
     f.render_widget(Paragraph::new(Line::from(header)), head_area);
-    let hint_w = hint.chars().count() as u16;
-    if area.width > hint_w {
-        f.render_widget(
-            Paragraph::new(Line::from(Span::styled(hint, hint_style))),
-            Rect::new(area.x + area.width - hint_w, area.y, hint_w, 1),
-        );
-    }
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(hint, hint_style))),
+        Rect::new(area.x + area.width - hint_w, area.y, hint_w, 1),
+    );
 
     let body = Rect::new(area.x, area.y + 1, area.width, area.height - 1);
 
@@ -547,6 +707,7 @@ pub fn draw(f: &mut Frame, cfg: &Config, st: &mut AppState) {
             f,
             st,
             body,
+            1,
             vec![(
                 Style::default().fg(Color::Cyan),
                 format!(" entry · {} ", d.entry.name),
@@ -570,18 +731,36 @@ pub fn draw(f: &mut Frame, cfg: &Config, st: &mut AppState) {
             ),
             Rect::new(body.x, y, body.width, 1),
         );
+        st.viewport = (0, body.height as usize);
+        let upd = st.update_available.clone();
+        if let Some(p) = st.help.as_mut() {
+            draw_help(f, area, cfg, upd.as_deref(), p);
+        }
         return;
     }
 
     // Full session history renders into an off-screen buffer; the pane shows
     // a scrollable window over it. Follow pins to the live tail.
     let titles = card_titles(st);
-    let interior_w = body.width.saturating_sub(2) as usize;
+    let columns = if st.visual {
+        (body.width / 34).max(1).min(st.cards.len() as u16)
+    } else {
+        1
+    };
+    let interior_w = (body.width / columns).saturating_sub(2) as usize;
     let blocks: Vec<(Style, String, String, Vec<Line>)> = st
         .cards
         .values()
         .zip(titles)
         .map(|(card, title)| {
+            if st.visual {
+                return (
+                    Style::default().fg(status_color(&card.status)),
+                    title,
+                    String::new(),
+                    visual_lines(card, interior_w, st.visual_selected, cfg),
+                );
+            }
             let lines = card_lines(
                 card,
                 interior_w,
@@ -594,7 +773,7 @@ pub fn draw(f: &mut Frame, cfg: &Config, st: &mut AppState) {
             (Style::default().fg(color), title, card_badge(card), lines)
         })
         .collect();
-    render_windowed(f, st, body, blocks);
+    render_windowed(f, st, body, columns, blocks);
 
     let upd = st.update_available.clone();
     if let Some(p) = st.help.as_mut() {
@@ -609,12 +788,27 @@ fn render_windowed(
     f: &mut Frame,
     st: &mut AppState,
     body: Rect,
+    columns: u16,
     blocks: Vec<(Style, String, String, Vec<Line>)>,
 ) {
-    let total: usize = blocks.iter().map(|(_, _, _, l)| l.len() + 2).sum();
-    let view_h = body.height as usize;
+    let heights: Vec<usize> = blocks
+        .chunks(columns as usize)
+        .map(|row| {
+            row.iter()
+                .map(|(_, _, _, l)| l.len() + 2)
+                .max()
+                .unwrap_or(0)
+        })
+        .collect();
+    let total: usize = heights.iter().sum();
+    // Compute against this frame's content, so resize and new cards update
+    // the cue immediately. Keep the map top-anchored on first entry.
+    let map_overflow =
+        st.visual && st.detail.is_none() && body.height > 1 && total > body.height as usize;
+    let view_h = body.height as usize - usize::from(map_overflow);
     st.viewport = (total, view_h);
-    let start = window_start(total, view_h, st.scroll);
+    let mut start = window_start(total, view_h, st.scroll);
+    let mut selected_range = None;
 
     let mut content = Buffer::empty(Rect::new(
         0,
@@ -623,7 +817,7 @@ fn render_windowed(
         total.min(u16::MAX as usize) as u16,
     ));
     let mut y: u16 = 0;
-    for (style, title, right, lines) in blocks {
+    for (i, (style, title, right, lines)) in blocks.into_iter().enumerate() {
         let h = lines.len() as u16 + 2;
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
@@ -632,11 +826,36 @@ fn render_windowed(
             .title(
                 Line::from(Span::styled(right, style.add_modifier(Modifier::BOLD))).right_aligned(),
             );
-        let rect = Rect::new(0, y, body.width, h);
+        let column = i as u16 % columns;
+        let w = body.width / columns;
+        let rect = Rect::new(column * w, y, w, h);
         let inner = block.inner(rect);
+        let mut selected_rows = lines.iter().enumerate().filter_map(|(row, line)| {
+            line.spans
+                .iter()
+                .any(|span| span.style.add_modifier.contains(Modifier::REVERSED))
+                .then_some(inner.y as usize + row)
+        });
+        if let Some(first) = selected_rows.next() {
+            selected_range = Some((first, selected_rows.next_back().unwrap_or(first) + 1));
+        }
         block.render(rect, &mut content);
         Paragraph::new(lines).render(inner, &mut content);
-        y = y.saturating_add(h);
+        if column + 1 == columns {
+            y = y.saturating_add(heights[i / columns as usize] as u16);
+        }
+    }
+
+    if st.visual && st.detail.is_none() && st.reveal_selection && view_h > 0 {
+        if let Some((first, end)) = selected_range {
+            if first < start || end - first > view_h {
+                start = first;
+            } else if end > start + view_h {
+                start = end - view_h;
+            }
+            st.scroll = crate::model::ScrollPos::At(start);
+        }
+        st.reveal_selection = false;
     }
 
     let fbuf = f.buffer_mut();
@@ -649,6 +868,24 @@ fn render_windowed(
             }
         }
     }
+    if map_overflow {
+        let direction = match (start > 0, start + view_h < total) {
+            (true, true) => "↑↓",
+            (true, false) => "↑",
+            _ => "↓",
+        };
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!(
+                    "{direction} {}–{}/{total} · J/K scroll",
+                    start + 1,
+                    start + view_h
+                ),
+                Style::default().fg(Color::Yellow),
+            ))),
+            Rect::new(body.x, body.y + view_h as u16, body.width, 1),
+        );
+    }
 }
 
 /// The keybinds table: (key, action, section). Single source of truth for
@@ -658,7 +895,7 @@ pub fn keybinds(cfg: &Config) -> Vec<(&'static str, String, &'static str)> {
     vec![
         (
             "j / k ↑↓",
-            s("move cursor across groups and rows"),
+            s("move cursor (text + activity map)"),
             "navigate",
         ),
         (
@@ -667,13 +904,22 @@ pub fn keybinds(cfg: &Config) -> Vec<(&'static str, String, &'static str)> {
             "navigate",
         ),
         ("h / l ←→", s("fold the selected group"), "navigate"),
-        ("e", s("expand / collapse all groups"), "navigate"),
+        (
+            "e",
+            s("expand / collapse groups (visible nodes in map)"),
+            "navigate",
+        ),
         ("J / K", s("scroll history by line"), "history"),
         ("PgUp / PgDn", s("scroll history by page"), "history"),
         ("g / G", s("jump to start · return to live tail"), "history"),
         (
             "f",
             s("full / trimmed content (detail + last response)"),
+            "content",
+        ),
+        (
+            "v",
+            s("activity map / text log (outside entry detail)"),
             "content",
         ),
         ("x", s("export update log to Markdown"), "actions"),
@@ -725,6 +971,10 @@ pub fn settings_lines(cfg: &Config) -> Vec<(String, String)> {
             format!("{} (codex)", cfg.codex_summary_model),
         ),
         ("show_all_panes".into(), cfg.show_all_panes.to_string()),
+        (
+            "visual_mode".into(),
+            format!("{} (startup)", cfg.visual_mode),
+        ),
         ("export_dir".into(), export),
         ("toggle key".into(), cfg.key_hint.clone()),
     ]
@@ -984,6 +1234,354 @@ fn detail_lines(
 mod tests {
     use super::*;
 
+    fn visual_fixture() -> AppState {
+        let mut st = AppState::new();
+        st.conn = Conn::Connected;
+        st.self_focused = true;
+        st.workspace_label = Some("demo".into());
+        st.scroll = crate::model::ScrollPos::At(0);
+        for (id, status) in [("a", "working"), ("b", "blocked"), ("c", "done")] {
+            let mut card = crate::model::test_card(id, status, std::time::Duration::ZERO);
+            card.agent = Some(format!("agent-{id}"));
+            card.title = Some(format!("Task {id}"));
+            st.cards.insert(id.into(), card);
+            let names = if id == "a" {
+                vec!["Old", "Read", "Edit", "Edit", "Bash"]
+            } else {
+                vec!["Read"]
+            };
+            st.apply_transcript(
+                id,
+                crate::transcript::TranscriptUpdate {
+                    activities: names
+                        .into_iter()
+                        .map(|name| crate::transcript::Activity {
+                            name: name.into(),
+                            detail: format!("{name} detail"),
+                            input: "{}".into(),
+                            offset: 0,
+                            tool_use_id: None,
+                        })
+                        .collect(),
+                    ..Default::default()
+                },
+                &Config::default(),
+            );
+        }
+        st
+    }
+
+    fn render(st: &mut AppState, visual: bool, width: u16, height: u16) -> Buffer {
+        let mut terminal =
+            Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+        st.visual = visual;
+        let cfg = Config::default();
+        terminal.draw(|f| draw(f, &cfg, st)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn position(buf: &Buffer, text: &str) -> (usize, usize) {
+        (0..buf.area.height)
+            .find_map(|y| {
+                let line: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+                line.find(text)
+                    .map(|x| (line[..x].chars().count(), y as usize))
+            })
+            .unwrap_or_else(|| panic!("missing {text:?} in {buf:?}"))
+    }
+
+    #[test]
+    fn reconnect_warning_takes_priority_over_header_hints() {
+        let mut st = visual_fixture();
+        st.workspace_label = Some("長いワークスペース名".repeat(8));
+        for visual in [false, true] {
+            for focused in [false, true] {
+                st.self_focused = focused;
+                st.flash = Some(("exported a log".into(), std::time::Instant::now()));
+                for width in [13, 40, 108] {
+                    st.conn = Conn::Reconnecting("socket closed".into());
+                    let buf = render(&mut st, visual, width, 20);
+                    let (x, y) = position(&buf, "reconnecting…");
+                    assert_eq!(y, 0);
+                    for dx in 0..13 {
+                        let cell = &buf[(x as u16 + dx, 0)];
+                        assert_eq!(cell.fg, Color::Red);
+                        assert!(cell.modifier.contains(Modifier::BOLD));
+                    }
+                }
+                st.conn = Conn::Connected;
+                st.flash = None;
+                let buf = render(&mut st, visual, 40, 20);
+                let hint = if !focused {
+                    "click pane"
+                } else if visual {
+                    "v text"
+                } else {
+                    "v map"
+                };
+                assert_eq!(position(&buf, hint).1, 0);
+                assert!(!(0..40)
+                    .map(|x| buf[(x, 0)].symbol())
+                    .collect::<String>()
+                    .contains("reconnecting"));
+            }
+        }
+    }
+
+    #[test]
+    fn map_overflow_cue_tracks_current_frame_and_scroll_position() {
+        let mut st = visual_fixture();
+        // One 18-line card and two 10-line cards; reserve the last row only
+        // when overflowing. Expectations do not use st.viewport's totals.
+        let top = render(&mut st, true, 40, 20);
+        assert_eq!(position(&top, "↓ 1–18/38 · J/K scroll"), (0, 19));
+        assert_eq!(st.viewport, (38, 18));
+        st.scroll_lines(5);
+        let middle = render(&mut st, true, 40, 20);
+        assert_eq!(position(&middle, "↑↓ 6–23/38 · J/K scroll"), (0, 19));
+        st.scroll_bottom();
+        let bottom = render(&mut st, true, 40, 20);
+        assert_eq!(position(&bottom, "↑ 21–38/38 · J/K scroll"), (0, 19));
+        let fits = render(&mut st, true, 40, 39);
+        assert_eq!(st.viewport, (38, 38));
+        assert!(!fits
+            .content
+            .iter()
+            .any(|c| c.symbol() == "↑" || c.symbol() == "↓" && c.fg == Color::Yellow));
+        // Resize immediately back across the exact fit boundary, without a
+        // second draw or tick; the last agent's bottom border stays visible.
+        let overflow = render(&mut st, true, 40, 38);
+        assert_eq!(position(&overflow, "↑ 3–38/38 · J/K scroll"), (0, 37));
+        assert_eq!(overflow[(0, 36)].symbol(), "╰");
+    }
+
+    #[test]
+    fn transient_feedback_is_visible_in_narrow_map_and_expires() {
+        let mut st = visual_fixture();
+        st.workspace_label = Some("a very long workspace label".into());
+        st.flash = Some(("text view only — press v".into(), std::time::Instant::now()));
+        let buf = render(&mut st, true, 40, 20);
+        let (x, y) = position(&buf, "text view only — press v");
+        assert_eq!(y, 0);
+        assert_eq!(buf[(x as u16, 0)].fg, Color::Yellow);
+        st.flash.as_mut().unwrap().1 -= std::time::Duration::from_secs(4);
+        assert_eq!(position(&render(&mut st, true, 40, 20), "v text").1, 0);
+    }
+
+    #[test]
+    fn toggling_changes_view_not_configured_startup_value() {
+        for startup in [false, true] {
+            let cfg = Config {
+                visual_mode: startup,
+                ..Config::default()
+            };
+            let mut st = visual_fixture();
+            if startup {
+                st.toggle_visual();
+            }
+            st.toggle_visual();
+            let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(80, 30)).unwrap();
+            terminal.draw(|f| draw(f, &cfg, &mut st)).unwrap();
+            position(
+                terminal.backend().buffer(),
+                if startup { "v map" } else { "v text" },
+            );
+            assert!(settings_lines(&cfg)
+                .contains(&("visual_mode".into(), format!("{startup} (startup)"))));
+        }
+    }
+
+    #[test]
+    fn visual_flow_is_vertical_chronological_and_responsive() {
+        let mut st = visual_fixture();
+        let wide = render(&mut st, true, 102, 30);
+        assert_eq!(position(&wide, "agent-a").1, position(&wide, "agent-b").1);
+        assert_eq!(position(&wide, "agent-c").0, 70);
+        let read = position(&wide, "Read");
+        let edit = position(&wide, "Edit ×2");
+        let bash = position(&wide, "Bash");
+        assert_eq!(read.0, edit.0);
+        assert_eq!(edit.0, bash.0);
+        assert!(read.1 < edit.1 && edit.1 < bash.1);
+        assert_eq!(wide[(0, 1)].fg, Color::Yellow);
+        assert_eq!(wide[(34, 1)].fg, Color::Red);
+        assert_eq!(wide[(68, 1)].fg, Color::Green);
+        let narrow = render(&mut st, true, 40, 65);
+        assert!(position(&narrow, "agent-b").1 > position(&narrow, "Bash").1);
+        // Exactly below/at the two-column breakpoint; an incomplete second
+        // row must start below the tallest first-row card, not its neighbor.
+        let one = render(&mut st, true, 67, 65);
+        assert!(position(&one, "agent-b").1 > position(&one, "agent-a").1);
+        let two = render(&mut st, true, 68, 65);
+        assert_eq!(position(&two, "agent-b").1, 1);
+        assert!(position(&two, "agent-c").1 > position(&two, "Bash").1);
+        let text = render(&mut st, false, 102, 40);
+        position(&text, "Old"); // map truncation must not discard history
+    }
+
+    #[test]
+    fn visual_fallbacks_and_tiny_viewports() {
+        let mut st = visual_fixture();
+        st.cards.get_mut("a").unwrap().transcript = None;
+        st.cards
+            .get_mut("b")
+            .unwrap()
+            .transcript
+            .as_mut()
+            .unwrap()
+            .stale = true;
+        st.cards
+            .get_mut("c")
+            .unwrap()
+            .transcript
+            .as_mut()
+            .unwrap()
+            .groups
+            .clear();
+        let buf = render(&mut st, true, 102, 30);
+        position(&buf, "status only");
+        position(&buf, "transcript unavailable");
+        position(&buf, "no tool activity yet");
+        st.conn = Conn::Reconnecting("test".into());
+        position(&render(&mut st, true, 102, 30), "reconnecting");
+        for (w, h) in [(1, 1), (2, 4), (18, 20), (19, 20), (20, 20)] {
+            render(&mut st, true, w, h);
+        }
+        st.cards.clear();
+        position(&render(&mut st, true, 60, 20), "no agent panes");
+        st.help = Some(crate::model::HelpPanel::default());
+        position(&render(&mut st, true, 80, 30), "activity map / text log");
+    }
+
+    #[test]
+    fn visual_groups_are_bounded_and_wide_tool_names_fit() {
+        let mut st = visual_fixture();
+        let card = st.cards.get_mut("a").unwrap();
+        let lines = visual_lines(card, 32, None, &Config::default());
+        let text = lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!text.contains("Old"));
+        assert!(text.contains("5 calls"));
+        card.transcript
+            .as_mut()
+            .unwrap()
+            .groups
+            .back_mut()
+            .unwrap()
+            .name = "工具".repeat(20);
+        let lines = visual_lines(card, 18, None, &Config::default());
+        let wide_name = lines
+            .iter()
+            .find(|l| l.to_string().contains("工具"))
+            .unwrap();
+        assert_eq!(wide_name.width(), 18);
+    }
+
+    #[test]
+    fn expanded_map_nodes_show_each_action_and_navigation_reveals_the_cursor() {
+        let mut st = visual_fixture();
+        let group = &mut st
+            .cards
+            .get_mut("a")
+            .unwrap()
+            .transcript
+            .as_mut()
+            .unwrap()
+            .groups[2];
+        group.rows[0].summary = Some("Updated parser".into());
+        group.rows[1].detail = "Added error tests".into();
+        render(&mut st, true, 40, 14);
+        st.select_step(true); // Edit
+        st.activate_selected();
+        st.select_step(true);
+        let first = render(&mut st, true, 40, 14);
+        let (x, y) = position(&first, "1. Updated parser");
+        assert!(first[(x as u16, y as u16)]
+            .modifier
+            .contains(Modifier::REVERSED));
+        st.select_step(true);
+        let second = render(&mut st, true, 40, 14);
+        let (x, y) = position(&second, "2. Added error tests");
+        assert!(second[(x as u16, y as u16)]
+            .modifier
+            .contains(Modifier::REVERSED));
+        position(&second, "↵ detail");
+        position(&second, "agent state");
+        assert!(matches!(st.scroll, crate::model::ScrollPos::At(n) if n > 0));
+        // Scrolling stays independent of selection until another cursor key.
+        st.scroll_bottom();
+        render(&mut st, true, 40, 14);
+        assert_eq!(st.scroll, crate::model::ScrollPos::Follow);
+        st.select_step(false);
+        position(&render(&mut st, true, 40, 14), "1. Updated parser");
+        st.fold_selected();
+        let collapsed = render(&mut st, true, 40, 14);
+        position(&collapsed, "▸ Edit ×2");
+        let text: String = collapsed.content.iter().map(|c| c.symbol()).collect();
+        assert!(!text.contains("Updated parser") && !text.contains("Added error tests"));
+    }
+
+    #[test]
+    fn map_cursor_reveals_later_grid_rows_after_resize_and_all_actions_in_large_nodes() {
+        let mut st = visual_fixture();
+        st.apply_transcript(
+            "a",
+            crate::transcript::TranscriptUpdate {
+                activities: (1..=60)
+                    .map(|i| crate::transcript::Activity {
+                        name: "Bash".into(),
+                        detail: format!("command-{i:02}"),
+                        input: "{}".into(),
+                        offset: i,
+                        tool_use_id: None,
+                    })
+                    .collect(),
+                ..Default::default()
+            },
+            &Config::default(),
+        );
+        render(&mut st, true, 102, 20);
+        st.select_step(true); // Edit
+        st.select_step(true); // Bash: existing + 60 appended actions
+        st.activate_selected();
+        for _ in 0..61 {
+            st.select_step(true);
+        }
+        let last_action = render(&mut st, true, 102, 20);
+        let (x, y) = position(&last_action, "61. command-60");
+        assert!(last_action[(x as u16, y as u16)]
+            .modifier
+            .contains(Modifier::REVERSED));
+        st.select_step(true); // Read in second card
+        let second_card = render(&mut st, true, 102, 20);
+        let selected: String = (0..20)
+            .flat_map(|y| (34..68).map(move |x| (x, y)))
+            .map(|p| &second_card[p])
+            .filter(|c| c.modifier.contains(Modifier::REVERSED))
+            .map(|c| c.symbol())
+            .collect();
+        assert!(selected.contains("▸ Read"));
+        st.select_step(true); // Read in third card
+        st.reveal_selection = true; // same as SIGWINCH
+        let resized = render(&mut st, true, 68, 12);
+        let selected: Vec<_> = resized
+            .content
+            .iter()
+            .filter(|c| c.modifier.contains(Modifier::REVERSED))
+            .map(|c| c.symbol())
+            .collect();
+        assert!(selected.concat().contains("▸ Read"));
+        assert!(matches!(st.scroll, crate::model::ScrollPos::At(n) if n > 60));
+        st.expand_all();
+        for (w, h) in [(1, 1), (2, 4), (17, 12), (19, 12), (20, 12)] {
+            st.reveal_selection = true;
+            render(&mut st, true, w, h);
+        }
+    }
+
     #[test]
     fn durations() {
         assert_eq!(fmt_duration(12), "12s");
@@ -1045,6 +1643,7 @@ mod tests {
                 tool_use_id: None,
             }],
             expanded: false,
+            visual_expanded: false,
         });
         card.transcript = Some(view);
         let text = |pending: &HashSet<u64>| -> String {

@@ -94,11 +94,36 @@ herdr plugin link /path/to/herdr-agent-state
 
 - `prefix+shift+s` — toggle the pane (open as an unfocused right split; press again
   to dismiss).
+- `v` — toggle the **vertical activity map** and the text log while the pane
+  is focused. Inspired by [Zoetrope](https://github.com/furkankly/zoetrope/tree/main/herdr-plugin),
+  the map shows status-colored agent cards with their three newest tool groups
+  connected top-to-bottom (oldest to newest). Wider panes place agents side by
+  side; narrow splits stack them. Connections show observed tool order, not
+  agent dependencies or completion percentages. Missing transcripts show a
+  status-only card. **Drill down in the map:** `j`/`k` or arrows select a node;
+  `enter`/`space` expands it into a numbered list of every retained action,
+  including single-action nodes. Select an action and press `enter` to read
+  its full input and paired result (`f` shows untrimmed content). `q` returns
+  to the expanded node and restores your map position. Action previews use
+  summaries when available, otherwise the raw tool description.
+  `h`/`l` folds the selected node (also from a child action); `e` expands or
+  collapses all visible nodes. Selected and expanded nodes stay on the map
+  when newer activity arrives. `J`/`K`, `PgUp`/`PgDn`, and `g`/`G` scroll
+  without moving the cursor; cursor navigation brings the selection on screen.
+  Each view keeps its own selection, folds, and scroll position, and the full
+  retained history remains available in text mode and for export.
+  The map starts at the top; when it overflows, a footer shows the visible
+  line range, arrows for more content above/below, and a scroll hint.
+  The map is static (no animation). Text is the default; set `visual_mode=true`
+  in `state.conf` or `HERDR_STATE_VISUAL_MODE=true` to start in map mode.
+  The `v` toggle lasts for the current invocation and does not rewrite config.
+  The settings tab shows `visual_mode` as the configured startup preference,
+  not the temporarily selected view.
 - `?` — help panel: a centered tabbed modal (file-viewer style). Tabs:
   **keybinds** (every key, grouped by section), **settings** (the effective
   live config — edited via state.conf), **about** (version, repo, license).
   `tab`/`h`/`l` cycle sections (wrapping), `j`/`k` scroll a long section,
-  `q`/`?` close. The header stays minimal (`? keys · q quit`) — the panel is
+  `q`/`?` close. The header stays minimal (`v map · ? keys · q quit`) — the panel is
   the reference.
 - Inside the pane: `j`/`k` (or arrows) move the cursor across group headers
   AND individual rows (children of expanded groups, singletons);
@@ -134,6 +159,7 @@ herdr plugin link /path/to/herdr-agent-state
 `state.conf` in `$(herdr plugin config-dir herdr-agent-state)` — see
 [state.conf.example](state.conf.example). Keys: `poll_ms`, `status_poll_ms`, `thinking_after_ms`, `tail_bytes`,
 `max_activity`, `text_snippet_len`, `key_hint`, `show_all_panes`,
+`visual_mode`,
 `summarizer` (auto/claude/codex/off), `summary_model`, `codex_summary_model`,
 `export_dir`.
 Env overrides

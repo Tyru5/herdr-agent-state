@@ -6,7 +6,7 @@
 # Env overrides win over this file per invocation: HERDR_STATE_POLL_MS,
 # HERDR_STATE_TAIL_BYTES, HERDR_STATE_MAX_ACTIVITY,
 # HERDR_STATE_TEXT_SNIPPET_LEN, HERDR_STATE_KEY_HINT,
-# HERDR_STATE_SHOW_ALL_PANES.
+# HERDR_STATE_SHOW_ALL_PANES, HERDR_STATE_VISUAL_MODE.
 
 # Transcript poll interval in ms; also the UI clock tick (100-5000).
 poll_ms = 500
@@ -36,6 +36,10 @@ key_hint = prefix+shift+s
 
 # Also show panes with no detected agent.
 show_all_panes = false
+
+# Start in the vertical activity map. Press v to switch map/text at runtime;
+# the toggle does not overwrite this startup preference. No animation.
+visual_mode = false
 
 # AI step summaries: rewrite raw tool calls into short human phrases using a
 # local agent CLI. auto = claude then codex, whichever is on PATH; or force

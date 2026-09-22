@@ -27,6 +27,8 @@ pub struct Config {
     pub key_hint: String,
     /// Also show panes with no detected agent.
     pub show_all_panes: bool,
+    /// Start with the compact activity map instead of the text log.
+    pub visual_mode: bool,
     /// Step-summary backend: "auto" (claude, then codex — whichever is on
     /// PATH), "claude", "codex", or "off".
     pub summarizer: String,
@@ -51,6 +53,7 @@ impl Default for Config {
             text_snippet_len: 200,
             key_hint: "prefix+shift+s".into(),
             show_all_panes: false,
+            visual_mode: false,
             summarizer: "auto".into(),
             summary_model: "haiku".into(),
             codex_summary_model: "gpt-5.4-mini".into(),
@@ -96,6 +99,7 @@ impl Config {
             ("HERDR_STATE_TEXT_SNIPPET_LEN", "text_snippet_len"),
             ("HERDR_STATE_KEY_HINT", "key_hint"),
             ("HERDR_STATE_SHOW_ALL_PANES", "show_all_panes"),
+            ("HERDR_STATE_VISUAL_MODE", "visual_mode"),
             ("HERDR_STATE_SUMMARIZER", "summarizer"),
             ("HERDR_STATE_SUMMARY_MODEL", "summary_model"),
             ("HERDR_STATE_CODEX_SUMMARY_MODEL", "codex_summary_model"),
@@ -147,6 +151,11 @@ impl Config {
             "show_all_panes" => {
                 if let Some(b) = parse_bool(val) {
                     self.show_all_panes = b;
+                }
+            }
+            "visual_mode" => {
+                if let Some(b) = parse_bool(val) {
+                    self.visual_mode = b;
                 }
             }
             "summarizer" => {
@@ -220,6 +229,16 @@ mod tests {
         c.apply_conf("poll_ms=1000\n");
         c.apply_env(|k| (k == "HERDR_STATE_POLL_MS").then(|| "250".to_string()));
         assert_eq!(c.poll_ms, 250);
+    }
+
+    #[test]
+    fn visual_mode_is_opt_in_and_env_wins() {
+        let mut c = Config::default();
+        assert!(!c.visual_mode);
+        c.apply_conf("visual_mode=on\nvisual_mode=invalid\n");
+        assert!(c.visual_mode);
+        c.apply_env(|k| (k == "HERDR_STATE_VISUAL_MODE").then(|| "off".into()));
+        assert!(!c.visual_mode);
     }
 
     #[test]

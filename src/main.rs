@@ -64,6 +64,8 @@ pub enum KeyMsg {
     FocusAgent,
     /// f: toggle full (untruncated) content in the detail view.
     Full,
+    /// v: switch between the text log and compact activity map.
+    Visual,
     /// x: export the whole update log to a Markdown file.
     Export,
     /// ?: toggle the help/settings panel.
@@ -158,6 +160,9 @@ fn main() -> std::io::Result<()> {
     let sum_reqs = summarize::spawn(tx.clone(), cfg.clone());
     update::spawn(tx.clone());
     let mut st = model::AppState::new();
+    if cfg.visual_mode {
+        st.toggle_visual();
+    }
 
     // stdin → key commands. Bytes, not crossterm events: q / Ctrl-C quit,
     // j/k and arrow up/down scroll, everything else ignored.
@@ -186,6 +191,7 @@ fn main() -> std::io::Result<()> {
                             b'e' => Some(KeyMsg::ExpandAll),
                             b'o' => Some(KeyMsg::FocusAgent),
                             b'f' => Some(KeyMsg::Full),
+                            b'v' => Some(KeyMsg::Visual),
                             b'x' => Some(KeyMsg::Export),
                             b'?' => Some(KeyMsg::Help),
                             0x09 => Some(KeyMsg::Tab),
@@ -239,6 +245,7 @@ fn main() -> std::io::Result<()> {
                             Some(KeyMsg::Activate) => "activate",
                             Some(KeyMsg::FocusAgent) => "focusagent",
                             Some(KeyMsg::Full) => "full",
+                            Some(KeyMsg::Visual) => "visual",
                             Some(KeyMsg::Export) => "export",
                             Some(KeyMsg::Help) => "help",
                             Some(KeyMsg::Tab) => "tab",
@@ -391,8 +398,15 @@ fn main() -> std::io::Result<()> {
                         st.flash = Some((msg, Instant::now()));
                     }
                     KeyMsg::Help => st.help = Some(model::HelpPanel::default()),
-                    KeyMsg::Tab => {}
+                    KeyMsg::Tab | KeyMsg::Visual => {}
                 },
+                Ev::Key(KeyMsg::Visual) => st.toggle_visual(),
+                Ev::Key(KeyMsg::Full) if st.visual => {
+                    st.flash = Some((
+                        "select an action · enter for full detail".into(),
+                        Instant::now(),
+                    ));
+                }
                 Ev::Key(KeyMsg::Quit) => break 'outer,
                 Ev::Key(KeyMsg::SelNext) => st.select_step(true),
                 Ev::Key(KeyMsg::SelPrev) => st.select_step(false),
@@ -436,7 +450,7 @@ fn main() -> std::io::Result<()> {
                     st.flash = Some((msg, Instant::now()));
                 }
                 Ev::UpdateCheck(newer) => st.update_available = newer,
-                Ev::Winch => {} // redraw happens at loop top
+                Ev::Winch => st.reveal_selection = st.visual,
                 Ev::Tick => {
                     // The tick is also the "since" clock; check (debounced)
                     // whether a fresh snapshot is worth fetching — a card
